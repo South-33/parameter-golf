@@ -203,8 +203,11 @@ flowchart TD
   This is the first post-quant branch in a while that produced repeated, non-tiny improvements on the same code path. But it is not an apples-to-apples free win yet: the tuned branch spends extra late training steps, so it must be judged against compute-matched baselines.
   A first compute-matched smoke check (`ITERATIONS=5` plus `POST_QUANT_CONTROL_TUNE_STEPS=5`) was clearly bad:
   - `final_int8_zlib_roundtrip_exact val_bpb 8.03244041`, compressed size `5,623,458`
-  So this branch does not replace ordinary training; it only looks plausible as a late add-on after enough base optimization.
-- Next step: Keep this branch active, but only as a late-phase add-on. If continued, compare it against a stronger time-matched baseline or reduce the late-tuning cost enough that it can plausibly fit inside the real 10-minute budget without gutting the main training phase.
+  Tighter budget splits were also bad:
+  - `ITERATIONS=9`, `POST_QUANT_CONTROL_TUNE_STEPS=1`: `8.01088149`, compressed size `5,629,855`
+  - `ITERATIONS=8`, `POST_QUANT_CONTROL_TUNE_STEPS=2`: `4.83772932`, compressed size `5,720,081`
+  So this branch does not replace ordinary training and does not currently survive budget-tightened local tests; it only looks plausible as a late add-on after enough base optimization.
+- Next step: Keep this below cleaner branches for now. Revisit only if we can prove a very cheap late-tuning phase fits inside the real 10-minute budget without materially cannibalizing the main training loop.
 
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
@@ -503,4 +506,7 @@ flowchart TD
 - Current conclusion: this is the strongest new post-quant branch in the latest loop, but it is not yet a clean headline because the tuned branch spends extra late training steps and therefore needs a compute-matched control before promotion to the main current-best branch.
 - First compute-matched smoke check:
   - `ITERATIONS=5` + `POST_QUANT_CONTROL_TUNE_STEPS=5`: `final_int8_zlib_roundtrip_exact val_bpb 8.03244041`, compressed size `5,623,458`
-- Current conclusion: the late control-tuning phase is not a substitute for main training; it only looks plausible as an add-on after enough base optimization.
+- Tighter budget splits were also poor:
+  - `ITERATIONS=9` + `POST_QUANT_CONTROL_TUNE_STEPS=1`: `final_int8_zlib_roundtrip_exact val_bpb 8.01088149`, compressed size `5,629,855`
+  - `ITERATIONS=8` + `POST_QUANT_CONTROL_TUNE_STEPS=2`: `4.83772932`, compressed size `5,720,081`
+- Current conclusion: the late control-tuning phase is not a substitute for main training and does not currently survive tighter total-step budgets; it only looks plausible as an add-on after enough base optimization.
