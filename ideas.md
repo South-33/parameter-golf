@@ -3,7 +3,7 @@
 This file is the shared idea backlog, experiment ledger, and research-loop memory for this project.
 
 Rules for agents:
-- Keep ideas ranked from best to worst based on current evidence.
+- Keep ideas loosely ranked by current evidence, and reorder them whenever new evidence changes the picture.
 - Edit this file directly when a better ranking, a genuinely novel idea, or a new experiment result appears.
 - Every idea should track both the current belief and the latest evidence.
 - When an idea is tried, record what was tested and what happened.
@@ -49,13 +49,13 @@ When a research pass is run:
 
 ## Current Research Thesis
 
-- Best current base: shared-core recurrence (`9 logical / 3 shared / dim 896`) is still the strongest local model branch.
-- Main bottleneck: post-quant collapse, especially when width goes beyond the current sweet spot.
-- Current highest-value surviving sub-idea: attention `v ↔ proj` equalization; exact MLP equalization is unstable across widths.
-- Current research priority order:
+- Best current local base: shared-core recurrence (`9 logical / 3 shared / dim 896`) is the strongest branch under the current proxy, not a guaranteed global optimum.
+- Main observed bottleneck: post-quant collapse, especially when width moves beyond the current local sweet spot.
+- Current strongest surviving sub-signal: attention `v ↔ proj` equalization; exact MLP equalization has looked less stable across widths.
+- Current research bias, subject to revision:
   1. quantization-stable architecture or parameterization changes that preserve the recurrence gain
   2. exporter or equivalent-transform ideas with same-checkpoint measurable effect
-  3. only then more invasive training-dynamics ideas
+  3. more invasive training-dynamics ideas if simpler geometry/export fixes stop paying off
 
 ## Research Log
 
@@ -74,8 +74,8 @@ When a research pass is run:
   - fixed Hadamard export did not clear the promotion bar
   - exact scale reparameterization had real signal, with `vproj` as the stable sub-idea
 - Prompt delta:
-  - future research prompts should explicitly say that fixed rotations, simple SwiGLU, naive QAT, grouped export, and generic eval tweaks have already been tested and are not where the next win is likely to come from
-  - future prompts should ask for ideas that beat the current shared-core base without assuming exporter-only tweaks are enough
+  - future research prompts should mention that fixed rotations, simple SwiGLU, naive QAT, grouped export, and generic eval tweaks have already shown weak or mixed evidence here
+  - future prompts should ask for ideas that plausibly beat the current shared-core base without assuming exporter-only tweaks are sufficient
 
 ## Ranked Ideas
 
@@ -83,19 +83,19 @@ When a research pass is run:
 - Status: `Promising`
 - Why: Share large block matrices across multiple logical layers, keep tiny per-logical-layer control tensors untied, and trade saved bytes for more effective capacity.
 - Latest result: Implemented and tested locally. It remains the best structural win. Wider settings improve raw quality, but post-quant degradation becomes the bottleneck by `dim 1024+`, so recurrence needs export/quantization help rather than more naive width.
-- Next step: Treat this as the base architecture and pair it with post-quant robustness work, especially centered export.
+- Next step: Treat this as the current reference architecture and compare new ideas against it unless fresh evidence points to a better base.
 
 ### 2. Scale Reparameterization / Equivalent Transforms
 - Status: `Testing`
 - Why: Reparameterize adjacent layers so difficult activation or weight scales are migrated into more quantization-friendly forms without changing the represented function.
 - Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc ↔ proj` pairs and attention `v ↔ proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`.
-- Next step: Treat exact `v ↔ proj` equalization as the surviving sub-idea. If this branch is continued, test a narrow `vproj`-only sweep or learned/activation-aware scale migration, not the bundled MLP equalization.
+- Next step: If this branch is continued, prioritize narrower `vproj`-focused follow-ups or learned/activation-aware scale migration over bundled MLP equalization.
 
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
 - Why: Apply a fixed or learned orthogonal change of basis around large 2D weights so outlier energy is spread across coordinates before int8 quantization instead of dominating a few rows.
 - Latest result: Implemented an export-only blockwise Hadamard path and tested it on same checkpoints. On `9/3 @ 896`, post-roundtrip `val_bpb` regressed from `3.45475773` to `3.45520042` while compressed size rose from `8,836,228` to `8,904,542` bytes. On `9/3 @ 1024`, it improved from `3.44899903` to `3.44652087`, but that is only about `0.072%` better, below the `0.1%` promotion threshold, with compressed size still rising from `11,066,108` to `11,142,110` bytes.
-- Next step: Do not escalate fixed rotations further right now. Revisit only if a later learned-rotation or basis-learning branch becomes compelling enough to justify a more invasive implementation.
+- Next step: Leave fixed rotations below stronger options for now. Revisit only if a later learned-rotation or basis-learning branch becomes compelling enough to justify a more invasive implementation.
 
 ### 4. Sparse Outlier Sidecar
 - Status: `Unvalidated`
