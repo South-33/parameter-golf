@@ -92,107 +92,32 @@ flowchart TD
     H --> I["Main unresolved problem\nKeep the recurrence gain after int8 export\nwithout expensive or fragile branches"]
 ```
 
+## Working Notes
+
+- Current performance headline -> use the matched `9/9 @ 512` comparison and the `1.86%` improvement figure; do not resurrect the older proxy comparison as the main story.
+- Current best branch -> `9/3 @ 896 / MLP_HIDDEN=2304` remains the branch to beat until a new same-code control says otherwise.
+- Active local signal -> `KURTOSIS_PENALTY` is the first new post-agent idea with a real same-code gain signal, so keep it live for now.
+- Stable exporter signal -> `v <-> proj` equalization is the cleaner export-side result; bundled MLP equalization is not the default path.
+- Clean external signals -> sliding-window eval, tokenizer efficiency, long-context training, and precision allocation all have real PR support.
+- Local caveat -> the short 10-step proxy is noisy, so same-code controls matter more than comparing distant code states.
+- Strategic caveat -> tokenizer and long-context ideas are real, but local cost still matters; do not let them crowd out cheaper branches without a good reason.
+
 ## Research Log
 
 ### 2026-03-19 - Research refresh after free wins were exhausted
 - Question shape: "Find new ideas that specifically beat shared-core recurrence by reducing post-quant collapse, not generic tuning."
-- Sources used: parallel subagent ideation, AlphaXiv/web-backed repo-aware review.
-- High-signal outcomes:
-  - multiple independent passes converged on rotation/incoherence transforms
-  - scale reparameterization / equivalent transforms emerged as the strongest second family
-  - sparse outlier sidecars, optimizer-aware late quant fine-tuning, and asymmetric recurrence were credible but secondary
-- Low-signal / noisy outcomes:
-  - generic optimizer tuning
-  - eval tricks
-  - architecture swaps not tied to the quantization bottleneck
-- What survived repo testing:
-  - fixed Hadamard export did not clear the promotion bar
-  - exact scale reparameterization had real signal, with `vproj` as the stable sub-idea
-- Prompt delta:
-  - future research prompts should mention that fixed rotations, simple SwiGLU, naive QAT, grouped export, and generic eval tweaks have already shown weak or mixed evidence here
-  - future prompts should ask for ideas that plausibly beat the current shared-core base without assuming exporter-only tweaks are sufficient
+- Sources used: parallel subagent ideation and AlphaXiv/web-backed repo review.
+- Result: rotation/incoherence and scale reparameterization were the main families that survived; fixed Hadamard was a miss, while `vproj` stayed the stable sub-signal.
 
-### 2026-03-19 - Public PR review against current backlog
-- Question shape: "Which open PR ideas are both real on the official challenge setup and aligned with our no-loophole direction?"
-- Sources used: current GitHub PR pages and submission summaries.
-- High-signal outcomes:
-  - real 8xH100 evidence says sliding-window eval with `stride=64` is materially useful, even if the local proxy did not show it
-  - tokenizer efficiency is a first-class branch now; SP-4096 plus sliding window reached `1.1888` in PR #53
-  - precision allocation at export matters in practice: fp16 tied embeddings and mixed int8/int6 both showed real gains on official-style runs
-- Low-signal / out-of-scope outcomes:
-  - val-only training can post extreme numbers, but it does not match the current no-hacks direction
-  - broad "systematic tuning" writeups without a sharp mechanism are weaker as idea sources
-- What survived contact with our current evidence:
-  - recurrence is still a strong local base, but it is no longer the only top-tier direction
-  - the backlog was underweighting tokenizer and real-eval ideas because the 4060 proxy was not representative enough
-- Prompt delta:
-  - future research prompts should ask for leaderboard-safe ideas that have already shown signal on real 8xH100 runs, especially tokenizer and precision-allocation mechanisms
-  - future prompts should separate "local proxy looked weak" from "real challenge evidence looked weak"
-
-### 2026-03-19 - PR audit for `#36` through `#70`
-- Question shape: "Across PRs `#36` through the current latest, which clean leaderboard-safe ideas are still missing or underweighted in our memory?"
-- Sources used: GitHub PR pages and submission summaries for `#36-#70` only.
-- High-signal outcomes:
-  - long-context training is a real clean branch, not just an eval trick: PR #65 pushed `TRAIN_SEQ_LEN=4096` with matching long-context eval, and PR #63 independently supported the same family at `2048`
-  - mixed-precision export is more compelling when framed as "buy capacity with saved bytes": PR #65 used int6/int8 allocation plus a wider `MLP_MULT=3` branch, which is stronger than our earlier generic mixed-precision note
-  - PR #61 adds a cleaner schedule-side sub-idea: a very long warmdown can sharply reduce post-training quantization damage even without changing the architecture
-  - sliding-window eval, tokenizer efficiency, and fp16 tied embeddings were reaffirmed rather than replaced
-- Low-signal / out-of-scope outcomes:
-  - val-train submissions stay out of scope for the current no-loophole direction
-  - several recurrence/QAT WIPs repeated ideas we already tested without stronger evidence
-  - weak system-specific submissions or no-description PRs did not add useful backlog signal
-- What survived contact with our current evidence:
-  - long-context training + matching eval deserves promotion as a first-class clean branch
-  - mixed-precision export should be thought of as a way to fund more useful capacity, especially wider MLPs, not only as a tiny exporter tweak
-  - overtone / NTK-style initialization ideas from PRs #59/#60 are interesting but still watchlist-tier, not promotion-tier
-- Prompt delta:
-  - future PR research should ask whether a branch wins by improving model quality, by improving BPB accounting, or by reallocating artifact bytes more efficiently
-  - future prompts should explicitly distinguish "already captured but corroborated" from "genuinely new direction"
-
-### 2026-03-19 - PR audit for `#1` through `#35`
-- Question shape: "Across the early PRs, is there any clean new signal beyond the recurrence / QAT / adapter families we already track?"
-- Sources used: GitHub PR pages and writeups for the low-number PRs that looked substantive.
-- High-signal outcomes:
-  - PR #10 added the only clear new nuance: tied embeddings appear worth protecting during training as an fp32-master parameter, not only at export time
-- Low-signal / repetitive outcomes:
-  - most early recurrence, LoRA, QAT, and SwiGLU PRs overlapped heavily with branches we already tested or already rank
-  - several early PRs were weaker-than-baseline, too WIP, or mainly useful as confirmation that others explored the same families
-- What survived contact with our current evidence:
-  - tied-embedding precision should be treated as a branch that can include both training-side and export-side protection
-  - early PRs do not currently add another top-tier clean branch beyond what is already in memory
-- Prompt delta:
-  - future PR research should spend less time on early recurrence/QAT repetition and more time on mechanism-level deltas that materially change how a familiar family works
-
-### 2026-03-19 - Issue audit
-- Question shape: "Do the repo issues reveal hidden constraints or strategic clarifications that should change our backlog?"
-- Sources used: current GitHub issues, especially open issues and constraint-related threads.
-- High-signal outcomes:
-  - Issue #43 suggests the tokenizer artifact itself may not count toward submission size, which strengthens the tokenizer branch strategically
-- Low-signal outcomes:
-  - environment clarification requests reinforce caution but do not create a new model idea
-  - process/meta issues did not add useful backlog signal
-- What survived contact with our current evidence:
-  - tokenizer work remains locally deferred for cost, but its strategic upside is even stronger than we were informally modeling
-- Prompt delta:
-  - future external research should separate "strategically strong but locally expensive" from "strategically weak"
+### 2026-03-19 - PR and issue audit sweep
+- Question shape: "What clean PR and issue signals should change the backlog or the way we compare runs?"
+- Sources used: GitHub PRs `#1-#70` and the active repo issues.
+- Result: sliding-window eval, tokenizer efficiency, mixed precision as capacity funding, long-context training, and fp16 tied embeddings all looked real; issue #43 strengthened the tokenizer branch strategically; issue #17 mostly reinforced environment caution.
 
 ### 2026-03-19 - Targeted idea pass against the widened shared-core winner
 - Question shape: "What new ideas specifically beat `9/3 @ 896 / MLP_HIDDEN=2304`, without repeating the failed exporter micro-tweak loop?"
 - Sources used: targeted repo-aware subagent ideation focused on the current widened shared-core branch.
-- High-signal outcomes:
-  - kurtosis-aware MLP regularization was the clearest new training-dynamics idea, and it already produced the first clean same-code local gain after implementation
-  - component-decoupled sharing emerged as the most credible architecture-side follow-up: keep attention highly shared, but let MLP capacity specialize more
-  - per-block warmdown calibration emerged as the strongest quantization-side follow-up that is not just another exporter trick
-- Low-signal / noisy outcomes:
-  - hard weight clipping is too close to the already fragile row-max-penalty family
-  - entropy-sorted packing and dual-scale low-bit packing are interesting, but still too speculative relative to the current bottleneck
-  - skip-gating / residual-decay ideas are plausible watchlist material, not priority branches yet
-- What survived contact with repo evidence:
-  - the current best branch is still "shared-core + moderately wider MLP"; the new ideas that deserve memory are the ones that improve that family, not replace it blindly
-  - the strongest next candidate families are now: kurtosis regularization, less-uniform sharing inside the block, and post-training per-block calibration
-- Prompt delta:
-  - future idea prompts should anchor on "beat the widened shared-core branch by reallocating capacity or reducing post-quant collapse", not on generic novelty
-  - future prompts should ask whether an idea improves the branch by changing architecture, training dynamics, or post-training calibration
+- Result: kurtosis-aware MLP regularization is the clearest new training-dynamics idea; component-decoupled sharing and per-block warmdown calibration are the strongest follow-ons if we keep pushing the current family.
 
 ## Ranked Ideas
 
