@@ -59,6 +59,20 @@ When a research pass is run:
   3. exporter or equivalent-transform ideas with same-checkpoint measurable effect
   4. more invasive training-dynamics ideas if simpler geometry/export fixes stop paying off
 
+## Progress Timeline
+
+```mermaid
+flowchart TD
+    A["Start\nLocal baseline-style branch\n9/9 @ 512\npost-quant proxy ~3.6465"] --> B["First real win\nShared-core recurrence\n9 logical / 3 shared"]
+    B --> C["Best local branch found\n9/3 @ 896\n~5.8% better than local baseline"]
+    C --> D["Quantization wall\nWider shared branches 1024 / 1536\npre-quant improves, post-quant collapses"]
+    D --> E["Cheap local tweaks mostly failed\nnaive QAT\n grouped int8\n simple adapters\n simple SwiGLU\n tiny smoke sliding-window eval"]
+    E --> F["Exporter-side signal emerged\nrow-centered export helped some 1024 checkpoints\nv ↔ proj equalization became the cleanest small signal"]
+    F --> G["External PR evidence changed priorities\nreal-run signal for stride-64 sliding eval\nSP-4096 tokenizer\nprecision allocation"]
+    G --> H["Current state\nBest local base: 9/3 @ 896\nSliding-window eval now considered real\nv ↔ proj equalization still alive\nfp16 tied embedding plausible but byte-costly"]
+    H --> I["Main unresolved problem\nKeep the recurrence gain after int8 export\nwithout expensive or fragile branches"]
+```
+
 ## Research Log
 
 ### 2026-03-19 - Research refresh after free wins were exhausted
@@ -120,7 +134,7 @@ When a research pass is run:
 - Status: `Unvalidated`
 - Why: A larger tokenizer can directly improve BPB by reducing tokens-per-byte, and public 8xH100 evidence now shows this is not just a theoretical lever.
 - Latest result: Strong external evidence from PR #53: `SP-4096` plus stride-64 sliding window reached `1.1888 val_bpb`, with the PR explicitly attributing a major share of the gain to a better compression ratio (`0.30 tokens/byte vs 0.41`). Repo-side plumbing is mostly ready, but a local check showed the current published Hugging Face manifest still exposes only `sp1024`, so `sp4096` is not a one-command cached download yet.
-- Next step: Treat this as a serious branch, not a side note. The next real step is local tokenizer/data re-export or equivalent local artifact generation, not just flipping a dataset variant flag.
+- Next step: Treat this as a serious branch, not a side note, but it is currently deferred on this machine because local tokenizer/data re-export needs the hosted `docs_selected.jsonl` raw docs file (`~48.17 GB`). Revisit when the download/storage/time cost is acceptable or when better hardware/workspace is available.
 
 ### 5. Sliding-Window Evaluation With Overlapping Context
 - Status: `Promising`
