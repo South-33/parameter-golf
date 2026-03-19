@@ -69,6 +69,7 @@ class Hyperparameters:
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
     num_layers = int(os.environ.get("NUM_LAYERS", 9))
     num_shared_blocks = int(os.environ.get("NUM_SHARED_BLOCKS", os.environ.get("NUM_LAYERS", 9)))
+    num_shared_mlps = int(os.environ.get("NUM_SHARED_MLPS", os.environ.get("NUM_SHARED_BLOCKS", os.environ.get("NUM_LAYERS", 9))))
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
@@ -1064,39 +1065,38 @@ class ResidualAdapter(nn.Module):
         return self.up(self.down(x))
 
 
-class Block(nn.Module):
+class AttentionBlock(nn.Module):
     def __init__(
         self,
         dim: int,
         num_heads: int,
         num_kv_heads: int,
-        mlp_mult: int,
-        mlp_kind: str,
-        mlp_hidden: int,
         rope_base: float,
         qk_gain_init: float,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
-        self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
-        self.mlp = MLP(dim, mlp_mult, mlp_kind, mlp_hidden)
 
     def forward(
         self,
         x: Tensor,
-        x0: Tensor,
-        resid_mix: Tensor,
         attn_scale: Tensor,
-        mlp_scale: Tensor,
         q_gain: Tensor,
     ) -> Tensor:
-        mix = resid_mix.to(dtype=x.dtype)
-        x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
         attn_out = self.attn(self.attn_norm(x), q_gain)
         x = x + attn_scale.to(dtype=x.dtype)[None, None, :] * attn_out
-        x = x + mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
         return x
+
+
+class MLPBlock(nn.Module):
+    def __init__(self, dim: int, mlp_mult: int, mlp_kind: str, mlp_hidden: int):
+        super().__init__()
+        self.mlp_norm = RMSNorm()
+        self.mlp = MLP(dim, mlp_mult, mlp_kind, mlp_hidden)
+
+    def forward(self, x: Tensor, mlp_scale: Tensor) -> Tensor:
+        return x + mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
 
 
 class GPT(nn.Module):
@@ -1105,6 +1105,7 @@ class GPT(nn.Module):
         vocab_size: int,
         num_layers: int,
         num_shared_blocks: int,
+        num_shared_mlps: int,
         model_dim: int,
         num_heads: int,
         num_kv_heads: int,
@@ -1127,12 +1128,18 @@ class GPT(nn.Module):
                 f"num_shared_blocks must be in [1, num_layers], got num_shared_blocks={num_shared_blocks}, "
                 f"num_layers={num_layers}"
             )
+        if num_shared_mlps <= 0 or num_shared_mlps > num_layers:
+            raise ValueError(
+                f"num_shared_mlps must be in [1, num_layers], got num_shared_mlps={num_shared_mlps}, "
+                f"num_layers={num_layers}"
+            )
         self.tie_embeddings = tie_embeddings
         self.tied_emb_fp32_master = tied_emb_fp32_master and tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
         self.num_layers = num_layers
         self.num_shared_blocks = num_shared_blocks
+        self.num_shared_mlps = num_shared_mlps
         self.mlp_kind = mlp_kind
         self.mlp_hidden = mlp_hidden
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
@@ -1157,21 +1164,19 @@ class GPT(nn.Module):
             if adapter_rank > 0
             else None
         )
-        self.blocks = nn.ModuleList(
+        self.attn_blocks = nn.ModuleList(
             [
-                Block(
+                AttentionBlock(
                     model_dim,
                     num_heads,
                     num_kv_heads,
-                    mlp_mult,
-                    mlp_kind,
-                    mlp_hidden,
                     rope_base,
                     qk_gain_init,
                 )
                 for _ in range(num_shared_blocks)
             ]
         )
+        self.mlp_blocks = nn.ModuleList([MLPBlock(model_dim, mlp_mult, mlp_kind, mlp_hidden) for _ in range(num_shared_mlps)])
         self.final_norm = RMSNorm()
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
@@ -1179,18 +1184,12 @@ class GPT(nn.Module):
         self._init_weights()
 
     def _apply_block(self, logical_idx: int, x: Tensor, x0: Tensor) -> Tensor:
-        block = self.blocks[logical_idx % self.num_shared_blocks]
-        x = block(
-            x,
-            x0,
-            self.resid_mixes[logical_idx],
-            self.attn_scales[logical_idx],
-            self.mlp_scales[logical_idx],
-            self.q_gains[logical_idx],
-        )
-        if self.adapters is not None:
-            x = x + self.adapters[logical_idx](x)
-        return x
+        mix = self.resid_mixes[logical_idx].to(dtype=x.dtype)
+        x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+        attn_block = self.attn_blocks[logical_idx % self.num_shared_blocks]
+        mlp_block = self.mlp_blocks[logical_idx % self.num_shared_mlps]
+        x = attn_block(x, self.attn_scales[logical_idx], self.q_gains[logical_idx])
+        x = mlp_block(x, self.mlp_scales[logical_idx])
         if self.adapters is not None:
             x = x + self.adapters[logical_idx](x)
         return x
@@ -1366,6 +1365,7 @@ def main() -> None:
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
         num_shared_blocks=args.num_shared_blocks,
+        num_shared_mlps=args.num_shared_mlps,
         model_dim=args.model_dim,
         num_heads=args.num_heads,
         num_kv_heads=args.num_kv_heads,
@@ -1455,7 +1455,10 @@ def main() -> None:
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model_params:{n_params}")
     log0(f"qat_start_step:{args.qat_start_step}")
-    log0(f"num_layers:{args.num_layers} num_shared_blocks:{args.num_shared_blocks}")
+    log0(
+        f"num_layers:{args.num_layers} num_shared_blocks:{args.num_shared_blocks} "
+        f"num_shared_mlps:{args.num_shared_mlps}"
+    )
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0(
         "sdp_backends:"

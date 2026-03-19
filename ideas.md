@@ -58,11 +58,10 @@ When a research pass is run:
 - Strongest active clean branches:
   - sliding-window eval
   - moderate MLP widening on the shared-core base
-  - kurtosis-penalized MLP training
   - `v <-> proj` equalization
   - tied-embedding precision handling
-- Best current kurtosis setting on the fixed code path:
-  - `KURTOSIS_PENALTY=1e-5` is the strongest confirmed local setting so far; `3e-5` still helps, while `1e-4` clearly over-regularizes and collapses the short-run result
+- Current caution:
+  - kurtosis regularization and component-decoupled sharing both showed mixed or weak evidence on the short 10-step local loop, so neither should currently replace the plain widened shared-core branch as the main local reference
 - Strategically strong but deferred here:
   - tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be more favorable than we first assumed
   - longer-context training (`2048+`) because public PR evidence is strong but the short 4060 proxy looked locally unattractive
@@ -143,7 +142,7 @@ flowchart TD
 ### 2026-03-19 - Kurtosis follow-up after fixing the local eval-to-train cache bug
 - Question shape: "Is the kurtosis branch still real once the local loop is rerun cleanly on the fixed code path?"
 - Sources used: direct local reruns on the current widened shared-core branch after fixing RoPE cache reuse across `torch.inference_mode()` validation and later training.
-- Result: yes. `KURTOSIS_PENALTY=1e-5` is the clean winner on the fixed path, `3e-5` still helps, and `1e-4` is clearly too strong.
+- Result: mixed. One fixed-path sweep favored `1e-5`, but a later matched confirmation pair produced a much better control (`3.54705695`) and a catastrophic `1e-5` run (`6.55704869`), so the short local loop does not currently support promoting kurtosis as a stable default.
 
 ## Ranked Ideas
 
@@ -170,21 +169,28 @@ flowchart TD
 - Next step: Treat `MLP_HIDDEN=2304` as the leading follow-on branch from the current shared-core base. Nearby checks at `2176` (`3.59427578`) and `2432` (`3.58679594`) were both worse, so there is no reason to keep sweeping this width range blindly.
 
 ### 2b. Kurtosis-Penalized MLP Training
-- Status: `Promising`
+- Status: `Testing`
 - Why: Penalize excess kurtosis in MLP weight rows during training so the widened shared-core branch learns smoother, less heavy-tailed weight distributions that survive per-row int8 export better.
 - Latest result: Added `KURTOSIS_PENALTY` as an MLP-only training regularizer and reran it cleanly on the current widened branch (`9/3 @ 896`, `MLP_HIDDEN=2304`) after fixing a local RoPE cache bug that could poison training after step-0 validation. Under the same short 10-step stride-64 post-quant setup:
   - fixed-path same-code control `KURTOSIS_PENALTY=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.56176579`, compressed size `6,087,863`
   - fixed-path `KURTOSIS_PENALTY=1e-5`: `3.54295889`, compressed size `5,927,262`
   - fixed-path `KURTOSIS_PENALTY=3e-5`: `3.54789266`, compressed size `6,083,427`
   - fixed-path `KURTOSIS_PENALTY=1e-4`: `3.78083123`, compressed size `5,791,697`
-  The branch held up after the bug fix. `1e-5` is the current best value and is about `0.53%` better than the matched fixed-path control; `3e-5` still helps, while `1e-4` is clearly too strong.
-- Next step: Keep this branch active. If continued, do one more clean confirmation of `1e-5` against control or use `1e-5` as the default kurtosis setting while testing the next architecture-side branch.
+  But a later matched confirmation pair on the same nominal setup shifted hard in the other direction:
+  - confirmation control `KURTOSIS_PENALTY=0`: `3.54705695`, compressed size `6,011,854`
+  - confirmation `KURTOSIS_PENALTY=1e-5`: `6.55704869`, compressed size `5,663,450`
+  So the branch currently looks unstable on this short local loop rather than robustly better.
+- Next step: Do not treat this as the new default. Revisit only with a less noisy eval protocol, stricter determinism controls, or a more targeted formulation than the current blunt MLP penalty.
 
 ### 2c. Component-Decoupled Sharing (Shared Attention, Less-Shared MLP)
-- Status: `Unvalidated`
+- Status: `Weak`
 - Why: The current best branch keeps the whole transformer block shared, but the latest evidence says the incremental gain is coming mostly from MLP capacity rather than uniformly from the whole block. A hybrid sharing scheme could spend bytes where they matter most.
-- Latest result: Not yet implemented here. The latest targeted ideation pass repeatedly converged on the same mechanism: keep attention highly shared to preserve the recurrence byte win, but let MLPs specialize more aggressively across depth or across shared blocks. This is meaningfully different from the weak low-rank-adapter branch because it changes where full-rank capacity lives instead of adding a tiny additive bypass.
-- Next step: If we continue architecture exploration inside the current family, this is one of the cleanest follow-ons: either share attention while untieing some or all MLP weights, or try heterogeneous MLP widths across the shared blocks before abandoning the shared-core base.
+- Latest result: Implemented a narrow version by decoupling MLP sharing from attention sharing with `NUM_SHARED_MLPS`, then tested "shared attention, less-shared MLP" on the `9/3 @ 896` family:
+  - refactor control `NUM_SHARED_MLPS=3`, `MLP_HIDDEN=2304`: `final_int8_zlib_roundtrip_exact val_bpb 3.54182495`, compressed size `6,011,854`
+  - matched-budget split `NUM_SHARED_MLPS=9`, `MLP_HIDDEN=768`: `3.54167698`, compressed size `6,351,414`
+  - larger split `NUM_SHARED_MLPS=9`, `MLP_HIDDEN=1024`: `3.57769543`, compressed size `7,098,835`
+  The matched-budget version was effectively a draw (`~0.004%` better, far below the promotion bar) with a larger artifact, and the larger version was clearly worse.
+- Next step: Leave this family below stronger branches unless a sharper formulation appears, such as heterogeneous per-shared-block MLP budgets or a more byte-efficient specialization mechanism.
 
 ### 2d. Per-Block Warmdown Quantization Calibration
 - Status: `Unvalidated`
@@ -470,3 +476,14 @@ flowchart TD
   - fixed-path `KURTOSIS_PENALTY=3e-5`: `3.54789266`, compressed size `6,083,427`
   - fixed-path `KURTOSIS_PENALTY=1e-4`: `3.78083123`, compressed size `5,791,697`
 - Current conclusion: the branch survives the bug fix. `1e-5` is the current best kurtosis setting on the matched fixed code path, `3e-5` still helps, and `1e-4` is clearly too strong.
+- Ran a later confirmation pair for the kurtosis branch on the same nominal fixed path:
+  - confirmation control `KURTOSIS_PENALTY=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.54705695`, compressed size `6,011,854`
+  - confirmation `KURTOSIS_PENALTY=1e-5`: `6.55704869`, compressed size `5,663,450`
+- Current conclusion: the short local loop is too unstable to promote kurtosis as a new default from these runs alone.
+- Implemented decoupled MLP sharing via `NUM_SHARED_MLPS` so attention sharing and MLP sharing can be tested independently.
+- Verified the refactor on the current branch:
+  - control `NUM_SHARED_MLPS=3`, `MLP_HIDDEN=2304`: `3.54182495`
+- Tested the first "shared attention, less-shared MLP" branch on the `9/3 @ 896` family:
+  - matched-budget split `NUM_SHARED_MLPS=9`, `MLP_HIDDEN=768`: `3.54167698`, compressed size `6,351,414`
+  - larger split `NUM_SHARED_MLPS=9`, `MLP_HIDDEN=1024`: `3.57769543`, compressed size `7,098,835`
+- Current conclusion: the first component-decoupled sharing probes are not strong enough to keep grinding; the matched-budget version is basically a draw and the larger version is worse.
