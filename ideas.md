@@ -52,7 +52,6 @@ When a research pass is run:
 - Best current local base: shared-core recurrence `9 logical / 3 shared / dim 896`
 - Best current short-run local branch: shared-core `9 logical / 3 shared / dim 896` with `MLP_HIDDEN=2304`
 - Best confirmed local improvement:
-  - about `5.8%` better than an earlier local baseline-style proxy
   - about `1.86%` better than a matched `9/9 @ 512` baseline under the current 10-step stride-64 post-quant setup
 - Main bottleneck: wider/shared models keep improving before export, then lose too much after int8 roundtrip
 - Strongest active clean branches:
@@ -83,8 +82,8 @@ When a research pass is run:
 
 ```mermaid
 flowchart TD
-    A["Start\nLocal baseline-style branch\n9/9 @ 512\npost-quant proxy ~3.6465"] --> B["First real win\nShared-core recurrence\n9 logical / 3 shared"]
-    B --> C["Best local branch found\n9/3 @ 896\n~5.8% better than local baseline"]
+    A["Start\nDefault baseline model\n9/9 @ 512\nmatched post-quant local score 3.61654604"] --> B["First real win\nShared-core recurrence\n9 logical / 3 shared"]
+    B --> C["Current best local branch\n9/3 @ 896 / MLP_HIDDEN=2304\nabout 1.86% better than matched baseline"]
     C --> D["Quantization wall\nWider shared branches 1024 / 1536\npre-quant improves, post-quant collapses"]
     D --> E["Cheap local tweaks mostly failed\nnaive QAT\n grouped int8\n simple adapters\n simple SwiGLU\n tiny smoke sliding-window eval"]
     E --> F["Exporter-side signal emerged\nrow-centered export helped some 1024 checkpoints\nv <-> proj equalization became the cleanest small signal"]

@@ -37,7 +37,7 @@
 
 - Best current local base -> shared-core recurrence `9 logical / 3 shared / dim 896`.
 - Best current short-run local branch -> shared-core `9 logical / 3 shared / dim 896` with `MLP_HIDDEN=2304`.
-- Best confirmed local improvement -> about `5.8%` better than an earlier local baseline-style proxy, and about `1.86%` better than a matched `9/9 @ 512` baseline under the current 10-step stride-64 post-quant setup.
+- Best confirmed local improvement -> about `1.86%` better than a matched `9/9 @ 512` baseline under the current 10-step stride-64 post-quant setup.
 - Main bottleneck -> wider models improve pre-quant quality, then lose too much after int8 export.
 - Strongest active clean branches -> sliding-window eval, moderate MLP widening on the shared-core base, kurtosis-penalized MLP training, `v <-> proj` equalization, and tied-embedding precision handling.
 - Strategically strong but currently deferred -> tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be friendlier than we first assumed; longer-context training is also strategically real but the short 4060 proxy looked locally unattractive.
