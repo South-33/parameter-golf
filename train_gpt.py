@@ -27,6 +27,8 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+STRICT_DETERMINISM = bool(int(os.environ.get("STRICT_DETERMINISM", "0")))
+
 # -----------------------------
 # HYPERPARAMETERS
 # -----------------------------
@@ -57,6 +59,7 @@ class Hyperparameters:
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
     disable_compile = bool(int(os.environ.get("DISABLE_COMPILE", "1" if os.name == "nt" else "0")))
     sdp_backend = os.environ.get("SDP_BACKEND", "math" if os.name == "nt" else "flash")
+    strict_determinism = STRICT_DETERMINISM
 
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
@@ -114,7 +117,7 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -
     # Orthogonalize a 2D update matrix with a fast Newton-Schulz iteration.
     # Muon uses this to normalize matrix-shaped gradients before applying them.
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.bfloat16()
+    X = G.to(dtype=torch.float32 if STRICT_DETERMINISM else torch.bfloat16)
     X /= X.norm() + eps
     transposed = G.size(0) > G.size(1)
     if transposed:
@@ -154,7 +157,11 @@ class Muon(torch.optim.Optimizer):
             nesterov = group["nesterov"]
 
             total_params = sum(int(p.numel()) for p in params)
-            updates_flat = torch.zeros(total_params, device=params[0].device, dtype=torch.bfloat16)
+            updates_flat = torch.zeros(
+                total_params,
+                device=params[0].device,
+                dtype=torch.float32 if STRICT_DETERMINISM else torch.bfloat16,
+            )
 
             curr = 0
             for i, p in enumerate(params):
@@ -1421,6 +1428,8 @@ def main() -> None:
         raise ValueError(f"WORLD_SIZE={world_size} must divide 8 so grad_accum_steps stays integral")
     grad_accum_steps = 8 // world_size
     grad_scale = 1.0 / grad_accum_steps
+    if args.strict_determinism:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
     device = torch.device("cuda", local_rank)
@@ -1431,8 +1440,13 @@ def main() -> None:
     master_process = rank == 0
 
     # Fast math knobs
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = not args.strict_determinism
+    torch.backends.cudnn.allow_tf32 = not args.strict_determinism
+    torch.backends.cudnn.benchmark = not args.strict_determinism
+    torch.backends.cudnn.deterministic = args.strict_determinism
+    if args.strict_determinism:
+        torch.set_float32_matmul_precision("highest")
+        torch.use_deterministic_algorithms(True, warn_only=False)
     from torch.backends.cuda import enable_cudnn_sdp, enable_flash_sdp, enable_math_sdp, enable_mem_efficient_sdp
 
     if args.sdp_backend == "cudnn":
@@ -1580,7 +1594,7 @@ def main() -> None:
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
-        fused=True,
+        fused=not args.strict_determinism,
     )
     optimizer_muon = Muon(
         matrix_params,
@@ -1594,7 +1608,7 @@ def main() -> None:
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
-        fused=True,
+        fused=not args.strict_determinism,
     )
     optimizers: list[torch.optim.Optimizer] = [optimizer_tok, optimizer_muon, optimizer_scalar]
     if base_model.lm_head is not None:
@@ -1602,7 +1616,7 @@ def main() -> None:
             [{"params": [base_model.lm_head.weight], "lr": args.head_lr, "base_lr": args.head_lr}],
             betas=(args.beta1, args.beta2),
             eps=args.adam_eps,
-            fused=True,
+            fused=not args.strict_determinism,
         )
         optimizers.insert(1, optimizer_head)
 
@@ -1643,6 +1657,7 @@ def main() -> None:
         f"post_quant_control_tune_lr:{args.post_quant_control_tune_lr}"
     )
     log0(f"seed:{args.seed}")
+    log0(f"strict_determinism:{int(args.strict_determinism)}")
     log0(f"int8_group_size:{INT8_GROUP_SIZE}")
     log0(f"int8_center_rows:{int(INT8_CENTER_ROWS)}")
     log0(f"int8_keep_tok_emb_fp16:{int(INT8_KEEP_TOK_EMB_FP16)}")
@@ -1830,7 +1845,7 @@ def main() -> None:
             [{"params": scalar_params, "lr": calib_lr, "base_lr": calib_lr}],
             betas=(args.beta1, args.beta2),
             eps=args.adam_eps,
-            fused=True,
+            fused=not args.strict_determinism,
         )
         calib_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
         log0(
