@@ -98,6 +98,7 @@ class Hyperparameters:
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
     qat_start_step = int(os.environ.get("QAT_START_STEP", -1))
     row_max_penalty = float(os.environ.get("ROW_MAX_PENALTY", 0.0))
+    kurtosis_penalty = float(os.environ.get("KURTOSIS_PENALTY", 0.0))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -925,6 +926,22 @@ def compute_row_max_penalty(params: list[Tensor]) -> Tensor:
     return torch.stack(penalties).mean()
 
 
+def compute_excess_kurtosis_penalty(params: list[Tensor]) -> Tensor:
+    penalties = []
+    eps = 1e-8
+    for p in params:
+        if p.ndim != 2 or p.numel() == 0:
+            continue
+        rows = p.float()
+        centered = rows - rows.mean(dim=1, keepdim=True)
+        var = centered.square().mean(dim=1)
+        excess = centered.pow(4).mean(dim=1) / (var.square() + eps) - 3.0
+        penalties.append(torch.relu(excess).mean())
+    if not penalties:
+        return torch.zeros((), device="cpu")
+    return torch.stack(penalties).mean()
+
+
 class Rotary(nn.Module):
     # Caches cos/sin tables per sequence length on the current device.
     def __init__(self, dim: int, base: float = 10000.0):
@@ -1391,6 +1408,13 @@ def main() -> None:
         and not name.startswith("lm_head.")
         and (p.ndim < 2 or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS))
     ]
+    mlp_matrix_params = [
+        p
+        for name, p in model_named_params
+        if ".mlp." in name
+        and p.ndim == 2
+        and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
+    ]
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
@@ -1450,6 +1474,7 @@ def main() -> None:
     log0(f"mlp_kind:{args.mlp_kind} mlp_mult:{args.mlp_mult} mlp_hidden:{args.mlp_hidden}")
     log0(f"adapter_rank:{args.adapter_rank}")
     log0(f"row_max_penalty:{args.row_max_penalty}")
+    log0(f"kurtosis_penalty:{args.kurtosis_penalty}")
     log0(f"seed:{args.seed}")
     log0(f"int8_group_size:{INT8_GROUP_SIZE}")
     log0(f"int8_center_rows:{int(INT8_CENTER_ROWS)}")
@@ -1576,6 +1601,10 @@ def main() -> None:
                 loss = model(x, y)
             if args.row_max_penalty > 0.0:
                 loss = loss + args.row_max_penalty * compute_row_max_penalty(matrix_params).to(device=device, dtype=loss.dtype)
+            if args.kurtosis_penalty > 0.0:
+                loss = loss + args.kurtosis_penalty * compute_excess_kurtosis_penalty(mlp_matrix_params).to(
+                    device=device, dtype=loss.dtype
+                )
             train_loss += loss.detach()
             (loss * grad_scale).backward()
         train_loss /= grad_accum_steps

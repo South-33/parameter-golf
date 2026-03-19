@@ -58,7 +58,8 @@ When a research pass is run:
 - Strongest active clean branches:
   - sliding-window eval
   - moderate MLP widening on the shared-core base
-  - `v ↔ proj` equalization
+  - kurtosis-penalized MLP training
+  - `v <-> proj` equalization
   - tied-embedding precision handling
 - Strategically strong but deferred here:
   - tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be more favorable than we first assumed
@@ -68,7 +69,7 @@ When a research pass is run:
 
 - Best current local base: shared-core recurrence (`9 logical / 3 shared / dim 896`) is the strongest branch under the current proxy, not a guaranteed global optimum.
 - Main observed bottleneck: post-quant collapse, especially when width moves beyond the current local sweet spot.
-- Current strongest surviving sub-signal: attention `v ↔ proj` equalization; exact MLP equalization has looked less stable across widths.
+- Current strongest surviving sub-signal: attention `v <-> proj` equalization; exact MLP equalization has looked less stable across widths.
 - Strong external signal from real 8xH100 PRs: sliding-window eval and tokenizer efficiency matter more than the local 4060 proxy suggested, so local null results there should not be over-weighted.
 - New external signal from the broader PR sweep: longer train/eval context and byte-funded wider MLPs look cleaner than many exporter-only tricks, and the first direct local probe says the wider-MLP part is the real win here.
 - Current research bias, subject to revision:
@@ -76,6 +77,7 @@ When a research pass is run:
   2. tokenizer, context-length, or evaluation changes that already show clean gains on real challenge runs
   3. exporter or equivalent-transform ideas with same-checkpoint measurable effect
   4. more invasive training-dynamics or precision-allocation ideas if simpler geometry/export fixes stop paying off
+  5. treat the short 10-step local proxy as noisy enough that same-code controls matter more than comparing across distant code states
 
 ## Progress Timeline
 
@@ -85,9 +87,9 @@ flowchart TD
     B --> C["Best local branch found\n9/3 @ 896\n~5.8% better than local baseline"]
     C --> D["Quantization wall\nWider shared branches 1024 / 1536\npre-quant improves, post-quant collapses"]
     D --> E["Cheap local tweaks mostly failed\nnaive QAT\n grouped int8\n simple adapters\n simple SwiGLU\n tiny smoke sliding-window eval"]
-    E --> F["Exporter-side signal emerged\nrow-centered export helped some 1024 checkpoints\nv ↔ proj equalization became the cleanest small signal"]
+    E --> F["Exporter-side signal emerged\nrow-centered export helped some 1024 checkpoints\nv <-> proj equalization became the cleanest small signal"]
     F --> G["External PR evidence changed priorities\nreal-run signal for stride-64 sliding eval\nSP-4096 tokenizer\nprecision allocation"]
-    G --> H["Current state\nBest local base: 9/3 @ 896\nSliding-window eval now considered real\nv ↔ proj equalization still alive\nfp16 tied embedding plausible but byte-costly"]
+    G --> H["Current state\nBest local base: 9/3 @ 896\nSliding-window eval now considered real\nv <-> proj equalization still alive\nfp16 tied embedding plausible but byte-costly"]
     H --> I["Main unresolved problem\nKeep the recurrence gain after int8 export\nwithout expensive or fragile branches"]
 ```
 
@@ -175,6 +177,24 @@ flowchart TD
 - Prompt delta:
   - future external research should separate "strategically strong but locally expensive" from "strategically weak"
 
+### 2026-03-19 - Targeted idea pass against the widened shared-core winner
+- Question shape: "What new ideas specifically beat `9/3 @ 896 / MLP_HIDDEN=2304`, without repeating the failed exporter micro-tweak loop?"
+- Sources used: targeted repo-aware subagent ideation focused on the current widened shared-core branch.
+- High-signal outcomes:
+  - kurtosis-aware MLP regularization was the clearest new training-dynamics idea, and it already produced the first clean same-code local gain after implementation
+  - component-decoupled sharing emerged as the most credible architecture-side follow-up: keep attention highly shared, but let MLP capacity specialize more
+  - per-block warmdown calibration emerged as the strongest quantization-side follow-up that is not just another exporter trick
+- Low-signal / noisy outcomes:
+  - hard weight clipping is too close to the already fragile row-max-penalty family
+  - entropy-sorted packing and dual-scale low-bit packing are interesting, but still too speculative relative to the current bottleneck
+  - skip-gating / residual-decay ideas are plausible watchlist material, not priority branches yet
+- What survived contact with repo evidence:
+  - the current best branch is still "shared-core + moderately wider MLP"; the new ideas that deserve memory are the ones that improve that family, not replace it blindly
+  - the strongest next candidate families are now: kurtosis regularization, less-uniform sharing inside the block, and post-training per-block calibration
+- Prompt delta:
+  - future idea prompts should anchor on "beat the widened shared-core branch by reallocating capacity or reducing post-quant collapse", not on generic novelty
+  - future prompts should ask whether an idea improves the branch by changing architecture, training dynamics, or post-training calibration
+
 ## Ranked Ideas
 
 ### 1. Shared-Core Depth Recurrence With Per-Layer FP32 Controls
@@ -186,7 +206,7 @@ flowchart TD
 ### 2. Scale Reparameterization / Equivalent Transforms
 - Status: `Testing`
 - Why: Reparameterize adjacent layers so difficult activation or weight scales are migrated into more quantization-friendly forms without changing the represented function.
-- Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc ↔ proj` pairs and attention `v ↔ proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`.
+- Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc <-> proj` pairs and attention `v <-> proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`.
 - Next step: If this branch is continued, prioritize narrower `vproj`-focused follow-ups or learned/activation-aware scale migration over bundled MLP equalization.
 
 ### 2a. Moderate MLP Widening On The Shared-Core Base
@@ -198,6 +218,28 @@ flowchart TD
   - wider `MLP_HIDDEN=2688`: `3.56047610`, compressed size `6,608,336`
   The `2304` setting was clearly best of the tested values.
 - Next step: Treat `MLP_HIDDEN=2304` as the leading follow-on branch from the current shared-core base. Nearby checks at `2176` (`3.59427578`) and `2432` (`3.58679594`) were both worse, so there is no reason to keep sweeping this width range blindly.
+
+### 2b. Kurtosis-Penalized MLP Training
+- Status: `Testing`
+- Why: Penalize excess kurtosis in MLP weight rows during training so the widened shared-core branch learns smoother, less heavy-tailed weight distributions that survive per-row int8 export better.
+- Latest result: Added `KURTOSIS_PENALTY` as an MLP-only training regularizer and tested it on the current widened branch (`9/3 @ 896`, `MLP_HIDDEN=2304`) under the same short 10-step stride-64 post-quant setup:
+  - same-code control `KURTOSIS_PENALTY=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.57991740`, compressed size `6,237,578`
+  - `KURTOSIS_PENALTY=1e-5`: `3.57012118`, compressed size `6,207,818`
+  - `KURTOSIS_PENALTY=3e-5`: `3.56901227`, compressed size `6,208,211`
+  This is a real same-code local improvement signal, but the short proxy is noisy enough that it should not yet replace the broader current-best branch headline.
+- Next step: Keep this active. If continued, try one stronger-but-still-safe value (for example `1e-4`) or rerun the best current setting to confirm the gain is robust rather than one noisy good draw.
+
+### 2c. Component-Decoupled Sharing (Shared Attention, Less-Shared MLP)
+- Status: `Unvalidated`
+- Why: The current best branch keeps the whole transformer block shared, but the latest evidence says the incremental gain is coming mostly from MLP capacity rather than uniformly from the whole block. A hybrid sharing scheme could spend bytes where they matter most.
+- Latest result: Not yet implemented here. The latest targeted ideation pass repeatedly converged on the same mechanism: keep attention highly shared to preserve the recurrence byte win, but let MLPs specialize more aggressively across depth or across shared blocks. This is meaningfully different from the weak low-rank-adapter branch because it changes where full-rank capacity lives instead of adding a tiny additive bypass.
+- Next step: If we continue architecture exploration inside the current family, this is one of the cleanest follow-ons: either share attention while untieing some or all MLP weights, or try heterogeneous MLP widths across the shared blocks before abandoning the shared-core base.
+
+### 2d. Per-Block Warmdown Quantization Calibration
+- Status: `Unvalidated`
+- Why: Shared blocks are reused across multiple logical depths, so a short post-training calibration pass that optimizes their quantized reconstruction could pay back more than a generic exporter tweak or naive QAT.
+- Latest result: Not yet implemented here. The latest targeted ideation pass elevated this as the strongest post-training follow-up that is neither another pure exporter trick nor another full training rewrite.
+- Next step: If exporter-only ideas keep saturating, test a narrow calibration loop on the current widened branch: freeze the trained checkpoint, optimize small per-channel corrections or equivalent scales for the reused block matrices, and judge it on same-checkpoint post-roundtrip eval.
 
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
@@ -465,3 +507,8 @@ flowchart TD
   - original-style baseline `9/9 @ 512`: `final_int8_zlib_roundtrip_exact val_bpb 3.61654604`, compressed size `6,905,103`
   - current best short-run branch `9/3 @ 896`, `MLP_HIDDEN=2304`: `3.54919676`, compressed size `6,123,000`
 - Current conclusion: under the current apples-to-apples short local setup, the best measured branch is about `1.86%` better than the matched baseline.
+- Added `KURTOSIS_PENALTY` as an MLP-only training regularizer inspired by the latest idea pass and tested it on the widened branch with same-code controls:
+  - same-code control `KURTOSIS_PENALTY=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.57991740`, compressed size `6,237,578`
+  - `KURTOSIS_PENALTY=1e-5`: `3.57012118`, compressed size `6,207,818`
+  - `KURTOSIS_PENALTY=3e-5`: `3.56901227`, compressed size `6,208,211`
+- Current conclusion: kurtosis regularization is the first new post-agent idea that showed a clean same-code local gain on the widened branch, but the short 10-step proxy is noisy enough that it should be treated as a promising signal, not final proof.

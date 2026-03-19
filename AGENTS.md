@@ -10,6 +10,7 @@
 - Windows local launch -> for single-GPU local loops prefer `python train_gpt.py` over `torchrun`; the Windows launcher path can trip over libuv/rendezvous issues that do not matter for the 1-GPU smoke workflow -> avoids wasting time on launcher-specific failures.
 - Timed-out CUDA probes -> on this Windows 4060 setup, timed-out local Python evals can leave orphaned GPU worker processes behind; check `nvidia-smi` / `Get-Process python` and clean them before the next run if utilization looks stuck -> avoids poisoned timing and fake slowness from stale workers.
 - Windows artifact writes -> repeated local runs can occasionally fail saving `final_model.pt` / `final_model.int8.ptz` with Windows file-lock error `1224`; if that happens, remove the output artifacts before rerunning and restore tracked artifacts afterward -> avoids losing a good probe to a save-only failure.
+- Short local proxy noise -> the 10-step stride-64 post-quant proxy can move noticeably across reruns even with the same nominal branch, so judge small changes against same-code controls rather than mixing results from distant code states -> avoids over-claiming tiny wins or regressions.
 - Git checkpoints -> make descriptive checkpoint commits after substantial progress and push when the result is worth preserving remotely -> keeps rollback points available during long experiment loops.
 - Experiment file hygiene -> keep ad hoc experiment/result text snapshots under `experiments/` instead of the repo root; reserve `logs/` for run logs and keep the root focused on source/config files -> prevents the project root from turning into an unreadable dump of probes.
 - Local dev environment -> primary machine is Windows 11 with an RTX 4060 8GB -> use it for CUDA smoke tests and iteration, not as a proxy for 8xH100 leaderboard performance.
@@ -38,5 +39,5 @@
 - Best current short-run local branch -> shared-core `9 logical / 3 shared / dim 896` with `MLP_HIDDEN=2304`.
 - Best confirmed local improvement -> about `5.8%` better than an earlier local baseline-style proxy, and about `1.86%` better than a matched `9/9 @ 512` baseline under the current 10-step stride-64 post-quant setup.
 - Main bottleneck -> wider models improve pre-quant quality, then lose too much after int8 export.
-- Strongest active clean branches -> sliding-window eval, moderate MLP widening on the shared-core base, `v <-> proj` equalization, and tied-embedding precision handling.
+- Strongest active clean branches -> sliding-window eval, moderate MLP widening on the shared-core base, kurtosis-penalized MLP training, `v <-> proj` equalization, and tied-embedding precision handling.
 - Strategically strong but currently deferred -> tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be friendlier than we first assumed; longer-context training is also strategically real but the short 4060 proxy looked locally unattractive.
