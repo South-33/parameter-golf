@@ -45,6 +45,7 @@ When a research pass is run:
 - capture the prompt/question shape, not the full raw prompt
 - record which ideas were genuinely new versus repeats
 - record which suggestions survived contact with repo evidence
+- score the pass against the prompt-craft checklist
 - end with a short `Prompt delta` so the next pass is sharper than the last one
 
 ## Current Snapshot
@@ -101,6 +102,21 @@ flowchart TD
 - Require the agent to return the top ideas plus why they are new, why they target the bottleneck, and the best first experiment.
 - Include the current matchable local headline and any clean external signals so the next agent does not overfit to stale proxy comparisons.
 - After each research pass, record which prompt shape worked, which ideas were genuinely new, and what the next prompt should ask for or avoid.
+
+### Prompt Checklist
+
+- Did the agent clearly identify the current best branch and the real current bottleneck?
+- Did it produce genuinely new ideas rather than renamed repeats?
+- Did it explain mechanisms instead of broad categories?
+- Did it give concrete first experiments that fit this repo?
+- Did it respect the no-loophole / leaderboard-safe direction?
+- Did it separate real signal from local proxy noise and unsupported claims?
+
+### How To Use It
+
+- Keep the checklist short and mostly yes/no so prompt quality is easy to judge across passes.
+- A research pass is good if it scores well on the checklist and changes the ranked backlog in a useful way.
+- If a pass scores poorly, update `Prompt Craft` before asking the next agent instead of just running more agents with the same prompt.
 
 ## Research Log
 
