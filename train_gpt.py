@@ -403,6 +403,9 @@ INT8_ROTATION_BLOCK_SIZE = int(os.environ.get("INT8_ROTATION_BLOCK_SIZE", "128")
 INT8_ROTATION_TARGET = os.environ.get("INT8_ROTATION_TARGET", "all_2d")
 INT8_SCALE_REPARAM_KIND = os.environ.get("INT8_SCALE_REPARAM_KIND", "none")
 INT8_SCALE_REPARAM_CLAMP = float(os.environ.get("INT8_SCALE_REPARAM_CLAMP", "4.0"))
+INT8_ACTIVATION_REPARAM_KIND = os.environ.get("INT8_ACTIVATION_REPARAM_KIND", "none")
+INT8_ACTIVATION_REPARAM_ALPHA = float(os.environ.get("INT8_ACTIVATION_REPARAM_ALPHA", "0.5"))
+INT8_ACTIVATION_REPARAM_CALIB_BATCHES = int(os.environ.get("INT8_ACTIVATION_REPARAM_CALIB_BATCHES", "0"))
 
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
@@ -539,17 +542,118 @@ def _clamp_channel_scale(scale: Tensor) -> Tensor:
         return scale
     return scale.clamp(1.0 / INT8_SCALE_REPARAM_CLAMP, INT8_SCALE_REPARAM_CLAMP)
 
-def apply_scale_reparameterization(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, object]]:
-    if INT8_SCALE_REPARAM_KIND == "none":
+def _validate_scale_reparam_kind(kind: str, env_name: str) -> None:
+    if kind not in {"none", "mlp", "vproj", "mlp_vproj"}:
+        raise ValueError(f"Unsupported {env_name}={kind!r}")
+
+
+def _scale_reparam_uses(kind: str, family: str) -> bool:
+    if kind == "none":
+        return False
+    if family == "mlp":
+        return kind in {"mlp", "mlp_vproj"}
+    if family == "vproj":
+        return kind in {"vproj", "mlp_vproj"}
+    raise ValueError(f"Unsupported reparameterization family={family!r}")
+
+
+def _geometric_mean(x: Tensor, eps: float = 1e-6) -> float:
+    if x.numel() == 0:
+        return 1.0
+    return float(torch.exp(torch.log(x.clamp_min(eps)).mean()).item())
+
+
+def collect_activation_reparam_stats(
+    args: "Hyperparameters",
+    model: "GPT",
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    grad_accum_steps: int,
+) -> dict[str, Tensor]:
+    _validate_scale_reparam_kind(INT8_ACTIVATION_REPARAM_KIND, "INT8_ACTIVATION_REPARAM_KIND")
+    if INT8_ACTIVATION_REPARAM_KIND == "none" or INT8_ACTIVATION_REPARAM_CALIB_BATCHES <= 0:
+        return {}
+
+    tracked_suffixes: list[str] = []
+    if _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "mlp"):
+        tracked_suffixes.append("mlp.proj")
+    if _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "vproj"):
+        tracked_suffixes.append("attn.proj")
+
+    stats: dict[str, Tensor] = {}
+    hooks: list[torch.utils.hooks.RemovableHandle] = []
+
+    def register_hook(module_name: str, module: nn.Module) -> None:
+        def hook(_module: nn.Module, inputs: tuple[Tensor, ...]) -> None:
+            if not inputs:
+                return
+            x = inputs[0]
+            if not isinstance(x, Tensor):
+                return
+            x_max = x.detach().abs().amax(dim=tuple(range(x.ndim - 1))).to(dtype=torch.float32)
+            prev = stats.get(module_name)
+            stats[module_name] = x_max if prev is None else torch.maximum(prev, x_max)
+
+        hooks.append(module.register_forward_pre_hook(hook))
+
+    for module_name, module in model.named_modules():
+        if any(module_name.endswith(suffix) for suffix in tracked_suffixes):
+            register_hook(module_name, module)
+
+    calib_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.inference_mode():
+            for _ in range(INT8_ACTIVATION_REPARAM_CALIB_BATCHES):
+                x, _ = calib_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                    model._forward_hidden(x)
+        if distributed := (world_size > 1):
+            for key in sorted(stats):
+                dist.all_reduce(stats[key], op=dist.ReduceOp.MAX)
+        return {name: tensor.detach().cpu().contiguous() for name, tensor in stats.items()}
+    finally:
+        for hook in hooks:
+            hook.remove()
+        if was_training:
+            model.train()
+
+
+def apply_scale_reparameterization(
+    state_dict: dict[str, Tensor], activation_stats: dict[str, Tensor] | None = None
+) -> tuple[dict[str, Tensor], dict[str, object]]:
+    _validate_scale_reparam_kind(INT8_SCALE_REPARAM_KIND, "INT8_SCALE_REPARAM_KIND")
+    _validate_scale_reparam_kind(INT8_ACTIVATION_REPARAM_KIND, "INT8_ACTIVATION_REPARAM_KIND")
+    if INT8_SCALE_REPARAM_KIND == "none" and INT8_ACTIVATION_REPARAM_KIND == "none":
         return state_dict, {}
-    if INT8_SCALE_REPARAM_KIND not in {"mlp", "vproj", "mlp_vproj"}:
-        raise ValueError(f"Unsupported INT8_SCALE_REPARAM_KIND={INT8_SCALE_REPARAM_KIND!r}")
 
     reparamed = {name: tensor.detach().clone() for name, tensor in state_dict.items()}
-    stats = {"mlp_pairs": 0, "vproj_pairs": 0}
+    stats: dict[str, object] = {
+        "mlp_pairs": 0,
+        "vproj_pairs": 0,
+        "activation_mlp_pairs": 0,
+        "activation_vproj_pairs": 0,
+    }
     eps = 1e-6
+    activation_stats = activation_stats or {}
 
-    if INT8_SCALE_REPARAM_KIND in {"mlp", "mlp_vproj"}:
+    mlp_ref = None
+    if _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "mlp"):
+        mlp_acts = [t.flatten().float() for name, t in activation_stats.items() if name.endswith("mlp.proj")]
+        if mlp_acts:
+            mlp_ref = _geometric_mean(torch.cat(mlp_acts))
+            stats["activation_mlp_ref"] = mlp_ref
+
+    vproj_ref = None
+    if _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "vproj"):
+        vproj_acts = [t.flatten().float() for name, t in activation_stats.items() if name.endswith("attn.proj")]
+        if vproj_acts:
+            vproj_ref = _geometric_mean(torch.cat(vproj_acts))
+            stats["activation_vproj_ref"] = vproj_ref
+
+    if _scale_reparam_uses(INT8_SCALE_REPARAM_KIND, "mlp") or _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "mlp"):
         for name, tensor in list(reparamed.items()):
             if not name.endswith(".mlp.fc.weight"):
                 continue
@@ -559,14 +663,26 @@ def apply_scale_reparameterization(state_dict: dict[str, Tensor]) -> tuple[dict[
                 continue
             fc = reparamed[name].float()
             proj = reparamed[proj_name].float()
-            a = fc.abs().amax(dim=1).clamp_min(eps)
-            b = proj.abs().amax(dim=0).clamp_min(eps)
-            scale = _clamp_channel_scale(b.pow(0.25) / a.sqrt())
+            scale = torch.ones(fc.shape[0], dtype=torch.float32, device=fc.device)
+            if _scale_reparam_uses(INT8_SCALE_REPARAM_KIND, "mlp") or _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "mlp"):
+                a = fc.abs().amax(dim=1).clamp_min(eps)
+                b = proj.abs().amax(dim=0).clamp_min(eps)
+                scale = scale * (b.pow(0.25) / a.sqrt())
+            if _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "mlp"):
+                act_name = prefix[:-1] + ".proj"
+                act = activation_stats.get(act_name)
+                if act is not None and mlp_ref is not None and act.numel() == scale.numel():
+                    act_factor = (torch.tensor(mlp_ref, dtype=torch.float32, device=fc.device) / act.float().to(fc.device).clamp_min(eps)).pow(
+                        0.5 * INT8_ACTIVATION_REPARAM_ALPHA
+                    )
+                    scale = scale * act_factor
+                    stats["activation_mlp_pairs"] = int(stats["activation_mlp_pairs"]) + 1
+            scale = _clamp_channel_scale(scale)
             reparamed[name] = (fc * scale[:, None]).to(dtype=tensor.dtype).contiguous()
             reparamed[proj_name] = (proj / scale.square()[None, :]).to(dtype=reparamed[proj_name].dtype).contiguous()
-            stats["mlp_pairs"] += 1
+            stats["mlp_pairs"] = int(stats["mlp_pairs"]) + 1
 
-    if INT8_SCALE_REPARAM_KIND in {"vproj", "mlp_vproj"}:
+    if _scale_reparam_uses(INT8_SCALE_REPARAM_KIND, "vproj") or _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "vproj"):
         for name, tensor in list(reparamed.items()):
             if not name.endswith(".attn.c_v.weight"):
                 continue
@@ -576,16 +692,29 @@ def apply_scale_reparameterization(state_dict: dict[str, Tensor]) -> tuple[dict[
                 continue
             v = reparamed[name].float()
             proj = reparamed[proj_name].float()
-            a = v.abs().amax(dim=1).clamp_min(eps)
             if proj.shape[1] % v.shape[0] != 0:
                 continue
             repeat_factor = proj.shape[1] // v.shape[0]
-            b = proj.abs().amax(dim=0).view(v.shape[0], repeat_factor).amax(dim=1).clamp_min(eps)
-            scale = _clamp_channel_scale(torch.sqrt(b / a))
+            scale = torch.ones(v.shape[0], dtype=torch.float32, device=v.device)
+            if _scale_reparam_uses(INT8_SCALE_REPARAM_KIND, "vproj") or _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "vproj"):
+                a = v.abs().amax(dim=1).clamp_min(eps)
+                b = proj.abs().amax(dim=0).view(v.shape[0], repeat_factor).amax(dim=1).clamp_min(eps)
+                scale = scale * torch.sqrt(b / a)
+            if _scale_reparam_uses(INT8_ACTIVATION_REPARAM_KIND, "vproj"):
+                act_name = prefix[:-1] + ".proj"
+                act = activation_stats.get(act_name)
+                if act is not None and vproj_ref is not None and act.numel() == proj.shape[1]:
+                    grouped_act = act.float().to(v.device).view(v.shape[0], repeat_factor).amax(dim=1)
+                    act_factor = (torch.tensor(vproj_ref, dtype=torch.float32, device=v.device) / grouped_act.clamp_min(eps)).pow(
+                        INT8_ACTIVATION_REPARAM_ALPHA
+                    )
+                    scale = scale * act_factor
+                    stats["activation_vproj_pairs"] = int(stats["activation_vproj_pairs"]) + 1
+            scale = _clamp_channel_scale(scale)
             expanded_scale = scale.repeat_interleave(repeat_factor)
             reparamed[name] = (v * scale[:, None]).to(dtype=tensor.dtype).contiguous()
             reparamed[proj_name] = (proj / expanded_scale[None, :]).to(dtype=reparamed[proj_name].dtype).contiguous()
-            stats["vproj_pairs"] += 1
+            stats["vproj_pairs"] = int(stats["vproj_pairs"]) + 1
 
     return reparamed, stats
 
@@ -690,7 +819,7 @@ def fake_quantize_weight_ste(t: Tensor) -> Tensor:
     dequant = dequantize_quantized_tensor(q, scale, qmeta, torch.float32, row_offset)
     return t + (dequant.to(dtype=t.dtype) - t).detach()
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
+def quantize_state_dict_int8(state_dict: dict[str, Tensor], activation_stats: dict[str, Tensor] | None = None):
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
     # - per-tensor int8 for other float tensors
@@ -703,7 +832,7 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
     passthrough_orig_dtypes: dict[str, str] = {}
     qmeta: dict[str, dict[str, object]] = {}
     offsets: dict[str, Tensor] = {}
-    transformed_state_dict, transform_stats = apply_scale_reparameterization(state_dict)
+    transformed_state_dict, transform_stats = apply_scale_reparameterization(state_dict, activation_stats=activation_stats)
     stats = dict.fromkeys(
         ("param_count", "num_tensors", "num_float_tensors", "num_nonfloat_tensors", "baseline_tensor_bytes", "int8_payload_bytes"),
         0,
@@ -781,6 +910,14 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             "clamp": INT8_SCALE_REPARAM_CLAMP,
             "mlp_pairs": stats["mlp_pairs"],
             "vproj_pairs": stats["vproj_pairs"],
+        }
+    if INT8_ACTIVATION_REPARAM_KIND != "none":
+        obj["activation_reparam"] = {
+            "kind": INT8_ACTIVATION_REPARAM_KIND,
+            "alpha": INT8_ACTIVATION_REPARAM_ALPHA,
+            "calib_batches": INT8_ACTIVATION_REPARAM_CALIB_BATCHES,
+            "mlp_pairs": stats["activation_mlp_pairs"],
+            "vproj_pairs": stats["activation_vproj_pairs"],
         }
     if INT8_KEEP_TOK_EMB_FP16:
         obj["keep_tok_emb_fp16"] = True
@@ -1519,6 +1656,11 @@ def main() -> None:
         f"int8_scale_reparam_kind:{INT8_SCALE_REPARAM_KIND} "
         f"int8_scale_reparam_clamp:{INT8_SCALE_REPARAM_CLAMP}"
     )
+    log0(
+        f"int8_activation_reparam_kind:{INT8_ACTIVATION_REPARAM_KIND} "
+        f"int8_activation_reparam_alpha:{INT8_ACTIVATION_REPARAM_ALPHA} "
+        f"int8_activation_reparam_calib_batches:{INT8_ACTIVATION_REPARAM_CALIB_BATCHES}"
+    )
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1736,7 +1878,21 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
+    activation_reparam_stats = collect_activation_reparam_stats(
+        args,
+        base_model,
+        rank,
+        world_size,
+        device,
+        grad_accum_steps,
+    )
+    if activation_reparam_stats:
+        log0(
+            f"activation_reparam_calibration: tensors:{len(activation_reparam_stats)} "
+            f"batches:{INT8_ACTIVATION_REPARAM_CALIB_BATCHES}"
+        )
+
+    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict(), activation_stats=activation_reparam_stats)
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()

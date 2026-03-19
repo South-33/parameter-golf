@@ -145,6 +145,16 @@ flowchart TD
 - Sources used: direct local reruns on the current widened shared-core branch after fixing RoPE cache reuse across `torch.inference_mode()` validation and later training.
 - Result: mixed. One fixed-path sweep favored `1e-5`, but a later matched confirmation pair produced a much better control (`3.54705695`) and a catastrophic `1e-5` run (`6.55704869`), so the short local loop does not currently support promoting kurtosis as a stable default.
 
+### 2026-03-20 - Activation-aware exporter reparameterization
+- Question shape: "Can train-data activation stats make the surviving `v <-> proj` equalization family meaningfully better, or is weight-only `vproj` already the whole signal?"
+- Sources used: direct local implementation and reruns on the current widened shared-core branch with train-data-only activation calibration before final int8 export.
+- Result: yes, but only at moderate strength. On `9/3 @ 896 / MLP_HIDDEN=2304` with the same 10-step stride-64 local setup:
+  - weight-only `INT8_SCALE_REPARAM_KIND=vproj`: `3.61809600`, compressed size `6,560,717`
+  - activation-aware `vproj`, `alpha=0.25`, `batches=2`: `3.61906591`, compressed size `6,572,517`
+  - activation-aware `vproj`, `alpha=0.5`, `batches=2`: `3.60947320`, compressed size `6,555,412`
+  - activation-aware `vproj`, `alpha=1.0`, `batches=2`: `3.62248382`, compressed size `6,628,506`
+  Moderate activation-aware scaling is the first clean follow-up that improved on same-code weight-only `vproj`, while stronger scaling hurt.
+
 ## Ranked Ideas
 
 ### 1. Shared-Core Depth Recurrence With Per-Layer FP32 Controls
@@ -154,10 +164,14 @@ flowchart TD
 - Next step: Treat this as the current reference architecture and compare new ideas against it unless fresh evidence points to a better base.
 
 ### 2. Scale Reparameterization / Equivalent Transforms
-- Status: `Testing`
+- Status: `Promising`
 - Why: Reparameterize adjacent layers so difficult activation or weight scales are migrated into more quantization-friendly forms without changing the represented function.
-- Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc <-> proj` pairs and attention `v <-> proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`.
-- Next step: If this branch is continued, prioritize narrower `vproj`-focused follow-ups or learned/activation-aware scale migration over bundled MLP equalization.
+- Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc <-> proj` pairs and attention `v <-> proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`. A new train-data-only activation-aware follow-up on the current widened branch also beat same-code weight-only `vproj` when kept moderate:
+  - weight-only `vproj`: `3.61809600`, compressed size `6,560,717`
+  - activation-aware `vproj`, `alpha=0.5`, `batches=2`: `3.60947320`, compressed size `6,555,412`
+  - weaker `alpha=0.25`: `3.61906591`
+  - stronger `alpha=1.0`: `3.62248382`
+- Next step: Treat attention `vproj` as the real continuation of this family. Keep follow-ups focused on moderate activation-aware `vproj` settings or stronger reconstruction-style calibration, and do not revive bundled MLP equalization as the default.
 
 ### 2a. Moderate MLP Widening On The Shared-Core Base
 - Status: `Promising`
