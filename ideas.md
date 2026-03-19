@@ -1,6 +1,6 @@
 # Parameter Golf Ideas
 
-This file is the shared idea backlog and experiment ledger for this project.
+This file is the shared idea backlog, experiment ledger, and research-loop memory for this project.
 
 Rules for agents:
 - Keep ideas ranked from best to worst based on current evidence.
@@ -8,6 +8,7 @@ Rules for agents:
 - Every idea should track both the current belief and the latest evidence.
 - When an idea is tried, record what was tested and what happened.
 - Do not delete weak or rejected ideas unless they are duplicates; keep a short reason so we do not retry bad paths blindly.
+- When external research or subagent ideation is used, record what was asked, what actually helped, what was noise, and how the next prompt should change.
 
 ## Status Meanings
 
@@ -38,6 +39,43 @@ When an experiment is run:
 - add a short dated note to `Experiment Log`
 - update the matching idea's `Latest result`
 - move the idea up or down if the evidence changed the ranking
+
+When a research pass is run:
+- add one entry to `Research Log`
+- capture the prompt/question shape, not the full raw prompt
+- record which ideas were genuinely new versus repeats
+- record which suggestions survived contact with repo evidence
+- end with a short `Prompt delta` so the next pass is sharper than the last one
+
+## Current Research Thesis
+
+- Best current base: shared-core recurrence (`9 logical / 3 shared / dim 896`) is still the strongest local model branch.
+- Main bottleneck: post-quant collapse, especially when width goes beyond the current sweet spot.
+- Current highest-value surviving sub-idea: attention `v ↔ proj` equalization; exact MLP equalization is unstable across widths.
+- Current research priority order:
+  1. quantization-stable architecture or parameterization changes that preserve the recurrence gain
+  2. exporter or equivalent-transform ideas with same-checkpoint measurable effect
+  3. only then more invasive training-dynamics ideas
+
+## Research Log
+
+### 2026-03-19 - Research refresh after free wins were exhausted
+- Question shape: "Find new ideas that specifically beat shared-core recurrence by reducing post-quant collapse, not generic tuning."
+- Sources used: parallel subagent ideation, AlphaXiv/web-backed repo-aware review.
+- High-signal outcomes:
+  - multiple independent passes converged on rotation/incoherence transforms
+  - scale reparameterization / equivalent transforms emerged as the strongest second family
+  - sparse outlier sidecars, optimizer-aware late quant fine-tuning, and asymmetric recurrence were credible but secondary
+- Low-signal / noisy outcomes:
+  - generic optimizer tuning
+  - eval tricks
+  - architecture swaps not tied to the quantization bottleneck
+- What survived repo testing:
+  - fixed Hadamard export did not clear the promotion bar
+  - exact scale reparameterization had real signal, with `vproj` as the stable sub-idea
+- Prompt delta:
+  - future research prompts should explicitly say that fixed rotations, simple SwiGLU, naive QAT, grouped export, and generic eval tweaks have already been tested and are not where the next win is likely to come from
+  - future prompts should ask for ideas that beat the current shared-core base without assuming exporter-only tweaks are enough
 
 ## Ranked Ideas
 
@@ -161,7 +199,7 @@ When an experiment is run:
 - Latest result: Not tested yet.
 - Next step: Defer until stronger byte-saving methods are exhausted.
 
-### 12. Persistent Validation KV Cache Across Chunks
+### 21. Persistent Validation KV Cache Across Chunks
 - Status: `Rejected`
 - Why: Likely too rule-sensitive for the first serious leaderboard-safe path.
 - Latest result: Rejected on legitimacy grounds before implementation.
