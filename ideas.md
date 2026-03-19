@@ -119,8 +119,8 @@ When a research pass is run:
 ### 4. Tokenizer Efficiency (Higher-Vocab SentencePiece)
 - Status: `Unvalidated`
 - Why: A larger tokenizer can directly improve BPB by reducing tokens-per-byte, and public 8xH100 evidence now shows this is not just a theoretical lever.
-- Latest result: Strong external evidence from PR #53: `SP-4096` plus stride-64 sliding window reached `1.1888 val_bpb`, with the PR explicitly attributing a major share of the gain to a better compression ratio (`0.30 tokens/byte vs 0.41`). We have not tested tokenizer changes locally yet.
-- Next step: Treat this as a serious branch, not a side note. Before implementation, estimate artifact pressure, embedding cost, and what minimal tokenizer pipeline changes are needed to keep byte accounting correct.
+- Latest result: Strong external evidence from PR #53: `SP-4096` plus stride-64 sliding window reached `1.1888 val_bpb`, with the PR explicitly attributing a major share of the gain to a better compression ratio (`0.30 tokens/byte vs 0.41`). Repo-side plumbing is mostly ready, but a local check showed the current published Hugging Face manifest still exposes only `sp1024`, so `sp4096` is not a one-command cached download yet.
+- Next step: Treat this as a serious branch, not a side note. The next real step is local tokenizer/data re-export or equivalent local artifact generation, not just flipping a dataset variant flag.
 
 ### 5. Sliding-Window Evaluation With Overlapping Context
 - Status: `Promising`
@@ -331,4 +331,7 @@ When a research pass is run:
 - Verified tokenizer branch readiness after reviewing PR #53:
   - existing data scripts already support `sp<VOCAB_SIZE>` variants, including `sp4096`
   - the local repo only lacked the `sp_bpe_4096` entry in `data/tokenizer_specs.json`
-- Current conclusion: the tokenizer branch is a real next implementation path, not a major pipeline rewrite.
+- Tried to fetch a cached `sp4096` slice via `cached_challenge_fineweb.py` and hit a real limitation:
+  - the current published Hugging Face `datasets/manifest.json` only exposes `fineweb10B_sp1024`
+  - `fineweb10B_sp4096` is therefore not currently available as a cached remote dataset through the helper
+- Current conclusion: the tokenizer branch is still real, but it needs local tokenizer/data re-export rather than a simple cached download.
