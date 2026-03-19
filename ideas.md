@@ -59,6 +59,7 @@ When a research pass is run:
   - sliding-window eval
   - moderate MLP widening on the shared-core base
   - `v <-> proj` equalization
+  - narrow attention-family GPTQ reconstruction
   - tied-embedding precision handling
   - post-quant control-tensor tuning
 - Current caution:
@@ -228,6 +229,17 @@ flowchart TD
   - `ITERATIONS=8`, `POST_QUANT_CONTROL_TUNE_STEPS=2`: `4.83772932`, compressed size `5,720,081`
   So this branch does not replace ordinary training and does not currently survive budget-tightened local tests; it only looks plausible as a late add-on after enough base optimization.
 - Next step: Keep this below cleaner branches for now. Revisit only if we can prove a very cheap late-tuning phase fits inside the real 10-minute budget without materially cannibalizing the main training loop.
+
+### 2e. GPTQ-Style Attention Reconstruction
+- Status: `Testing`
+- Why: Use train-data calibration activations to do a second-order post-training reconstruction pass on the shared attention `c_v` / `proj` weights before final int8 export, targeting the actual post-quant collapse instead of nudging training dynamics.
+- Latest result: Narrow same-checkpoint exporter-only probes on the saved `20`-step `9/3 @ 896 / MLP_HIDDEN=2304` checkpoint are the cleanest new signal in the latest loop. Using train-data calibration and a GPTQ/OBC-style sequential reconstruction pass:
+  - baseline export: `3.63783062`, compressed size `5,778,098`
+  - attention `proj` only: `3.60487437`, compressed size `7,995,261`
+  - attention `c_v + proj`: `3.60469155`, compressed size `8,662,688`
+  - MLP `fc` only: `3.63804545`, compressed size `9,128,195`
+  The attention-family branch produced a meaningful fixed-checkpoint gain while staying under the artifact cap, whereas the first MLP-side reconstruction pass was all byte cost and no quality win. A tiny end-to-end `train_gpt.py` smoke run with `INT8_GPTQ_TARGET=attn_vproj` also completed successfully, so the integrated exporter path is live even though the `1`-step score itself is not informative.
+- Next step: Keep the branch narrow. If continued, compare `attn_proj` vs `attn_vproj` with small calibration/damping sweeps and then do one end-to-end training run only after the same-checkpoint exporter signal is stable enough to justify it.
 
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
@@ -530,3 +542,24 @@ flowchart TD
   - `ITERATIONS=9` + `POST_QUANT_CONTROL_TUNE_STEPS=1`: `final_int8_zlib_roundtrip_exact val_bpb 8.01088149`, compressed size `5,629,855`
   - `ITERATIONS=8` + `POST_QUANT_CONTROL_TUNE_STEPS=2`: `4.83772932`, compressed size `5,720,081`
 - Current conclusion: the late control-tuning phase is not a substitute for main training and does not currently survive tighter total-step budgets; it only looks plausible as an add-on after enough base optimization.
+- Reran the plain current widened branch as a harness sanity check and confirmed the old score range is still reachable, but the 10-step loop is too noisy to trust tiny deltas:
+  - same nominal plain branch rerun A: `3.56872186`
+  - same nominal plain branch rerun B: `3.54116535`
+- Added a strict local determinism mode (`STRICT_DETERMINISM=1`) that disables TF32/fused Adam and tightens CUDA determinism for debugging, then tested it on the same plain branch:
+  - strict rerun A: `3.54207253`
+  - strict rerun B: `3.56364567`
+  - stricter Muon-fp32 rerun A: `3.56925742`
+  - stricter Muon-fp32 rerun B: `4.26011008`
+- Current conclusion: there is still no single obvious training bug, but the short local loop is not reproducible enough for promotion-grade evidence; strict determinism is useful as a diagnostic, not as the default ranking mode.
+- Switched to a same-checkpoint exporter-only probe on the saved 20-step `9/3 @ 896 / MLP_HIDDEN=2304` checkpoint and tested adaptive clipping without retraining:
+  - baseline export: `3.44982135`, compressed size `6,886,666`
+  - adaptive clipping `8` steps, min percentile `99.0`: `3.44985471`, compressed size `6,886,471`
+  - adaptive clipping `16` steps, min percentile `99.0`: `3.44983465`, compressed size `6,886,446`
+- Current conclusion: naive adaptive clipping is effectively flat on a fixed checkpoint and should not be the next main branch.
+- Built a reusable same-checkpoint GPTQ probe and used it to test narrow second-order reconstruction on the saved widened checkpoint using train-data calibration:
+  - baseline export: `3.63783062`, compressed size `5,778,098`
+  - attention `proj` only: `3.60487437`, compressed size `7,995,261`
+  - attention `c_v + proj`: `3.60469155`, compressed size `8,662,688`
+  - MLP `fc` only: `3.63804545`, compressed size `9,128,195`
+- Current conclusion: exporter-only second-order reconstruction is now the strongest clean quant-calibration signal in the repo, but it is narrow. The live branch is attention-family GPTQ, not broad all-layer reconstruction.
+- Integrated the narrow GPTQ branch into `train_gpt.py` behind `INT8_GPTQ_TARGET` and verified a tiny end-to-end smoke run with `INT8_GPTQ_TARGET=attn_vproj`, `INT8_GPTQ_CALIB_BATCHES=1` completed through final exact int8 eval.

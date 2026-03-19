@@ -403,6 +403,9 @@ INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 INT8_GROUP_SIZE = int(os.environ.get("INT8_GROUP_SIZE", "0"))
 INT8_CENTER_ROWS = bool(int(os.environ.get("INT8_CENTER_ROWS", "0")))
 INT8_KEEP_TOK_EMB_FP16 = bool(int(os.environ.get("INT8_KEEP_TOK_EMB_FP16", "0")))
+INT8_GPTQ_TARGET = os.environ.get("INT8_GPTQ_TARGET", "none")
+INT8_GPTQ_CALIB_BATCHES = int(os.environ.get("INT8_GPTQ_CALIB_BATCHES", "0"))
+INT8_GPTQ_DAMP = float(os.environ.get("INT8_GPTQ_DAMP", "0.01"))
 INT8_LOWBIT_BITS = int(os.environ.get("INT8_LOWBIT_BITS", "8"))
 INT8_LOWBIT_TARGET = os.environ.get("INT8_LOWBIT_TARGET", "none")
 INT8_ROTATION_KIND = os.environ.get("INT8_ROTATION_KIND", "none")
@@ -628,6 +631,131 @@ def collect_activation_reparam_stats(
             model.train()
 
 
+def _validate_gptq_target(target: str) -> None:
+    if target not in {"none", "attn_proj", "attn_vproj"}:
+        raise ValueError(f"Unsupported INT8_GPTQ_TARGET={target!r}")
+
+
+def _gptq_target_uses(target: str, weight_name: str) -> bool:
+    if target == "attn_proj":
+        return weight_name.endswith(".attn.proj.weight")
+    if target == "attn_vproj":
+        return weight_name.endswith(".attn.proj.weight") or weight_name.endswith(".attn.c_v.weight")
+    return False
+
+
+def collect_gptq_hessians(
+    args: "Hyperparameters",
+    model: "GPT",
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    grad_accum_steps: int,
+) -> dict[str, Tensor]:
+    _validate_gptq_target(INT8_GPTQ_TARGET)
+    if INT8_GPTQ_TARGET == "none" or INT8_GPTQ_CALIB_BATCHES <= 0:
+        return {}
+    if INT8_GROUP_SIZE > 0 or INT8_CENTER_ROWS or INT8_ROTATION_KIND != "none":
+        raise ValueError("INT8_GPTQ_TARGET currently requires plain per-row int8 export without grouping, centering, or rotation")
+    if INT8_LOWBIT_BITS < 8 and INT8_LOWBIT_TARGET != "none":
+        raise ValueError("INT8_GPTQ_TARGET currently requires 8-bit export on the targeted tensors")
+    if INT8_SCALE_REPARAM_KIND != "none" or INT8_ACTIVATION_REPARAM_KIND != "none":
+        raise ValueError("INT8_GPTQ_TARGET currently requires scale reparameterization to be disabled")
+
+    wanted_modules = {
+        f"{module_name}.weight": module
+        for module_name, module in model.named_modules()
+        if _gptq_target_uses(INT8_GPTQ_TARGET, f"{module_name}.weight")
+    }
+    if not wanted_modules:
+        return {}
+
+    hessians: dict[str, Tensor] = {}
+    counts: dict[str, int] = {}
+    hooks: list[torch.utils.hooks.RemovableHandle] = []
+
+    def register_hook(weight_name: str, module: nn.Module) -> None:
+        def hook(_module: nn.Module, inputs: tuple[Tensor, ...]) -> None:
+            if not inputs or not isinstance(inputs[0], Tensor):
+                return
+            flat = inputs[0].detach().to(dtype=torch.float32).reshape(-1, inputs[0].shape[-1])
+            h_cpu = (flat.T @ flat).cpu().clone()
+            prev = hessians.get(weight_name)
+            hessians[weight_name] = h_cpu if prev is None else prev.add_(h_cpu)
+            counts[weight_name] = counts.get(weight_name, 0) + flat.shape[0]
+
+        hooks.append(module.register_forward_pre_hook(hook))
+
+    for weight_name, module in wanted_modules.items():
+        register_hook(weight_name, module)
+
+    calib_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+    was_training = model.training
+    model.eval()
+    count_tensor: Tensor | None = None
+    try:
+        with torch.inference_mode():
+            for _ in range(INT8_GPTQ_CALIB_BATCHES):
+                x, _ = calib_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                    model._forward_hidden(x)
+        if world_size > 1:
+            for key in sorted(hessians):
+                h = hessians[key].to(device=device, dtype=torch.float32)
+                dist.all_reduce(h, op=dist.ReduceOp.SUM)
+                hessians[key] = h.cpu().contiguous()
+                count_tensor = torch.tensor(float(counts[key]), device=device, dtype=torch.float32)
+                dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
+                counts[key] = int(count_tensor.item())
+        for key, h in list(hessians.items()):
+            denom = max(counts.get(key, 0), 1)
+            hessians[key] = (h.clone() / denom).contiguous()
+        return hessians
+    finally:
+        for hook in hooks:
+            hook.remove()
+        if was_training:
+            model.train()
+
+
+def quantize_matrix_gptq(weight: Tensor, hessian: Tensor) -> tuple[Tensor, Tensor, dict[str, object], Tensor | None]:
+    w = weight.detach().to(dtype=torch.float32, device="cpu").contiguous()
+    rows, cols = w.shape
+    q_codes = torch.empty((rows, cols), dtype=torch.int8)
+    scales = torch.empty((rows,), dtype=torch.float32)
+
+    h = hessian.detach().to(dtype=torch.float32, device="cpu").contiguous()
+    eye = torch.eye(h.shape[0], dtype=torch.float32)
+    avg_diag = float(torch.diag(h).mean().item()) if h.numel() else 1.0
+    damping = max(INT8_GPTQ_DAMP * avg_diag, 1e-6)
+    while True:
+        try:
+            chol = torch.linalg.cholesky(h + eye * damping)
+            h_inv = torch.cholesky_inverse(chol)
+            break
+        except RuntimeError:
+            damping *= 10.0
+            if damping > 1e6:
+                raise
+
+    diag = torch.diag(h_inv).clamp_min(1e-8)
+    qmax = 127.0
+    for row_idx in range(rows):
+        row = w[row_idx].clone()
+        clip_abs = float(torch.quantile(row.abs(), INT8_CLIP_Q).item()) if row.numel() else 0.0
+        scale = clip_abs / qmax if clip_abs > 0 else 1.0
+        scales[row_idx] = scale
+        if clip_abs <= 0:
+            q_codes[row_idx].zero_()
+            continue
+        for col_idx in range(cols):
+            q = float(torch.clamp(torch.round(torch.clamp(row[col_idx], -clip_abs, clip_abs) / scale), -qmax, qmax).item())
+            err = (row[col_idx] - q * scale) / diag[col_idx]
+            row[col_idx:] -= err * h_inv[col_idx, col_idx:]
+            q_codes[row_idx, col_idx] = int(q)
+    return q_codes.contiguous(), scales.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous(), {"scheme": "per_row", "axis": 0}, None
+
+
 def apply_scale_reparameterization(
     state_dict: dict[str, Tensor], activation_stats: dict[str, Tensor] | None = None
 ) -> tuple[dict[str, Tensor], dict[str, object]]:
@@ -826,7 +954,11 @@ def fake_quantize_weight_ste(t: Tensor) -> Tensor:
     dequant = dequantize_quantized_tensor(q, scale, qmeta, torch.float32, row_offset)
     return t + (dequant.to(dtype=t.dtype) - t).detach()
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor], activation_stats: dict[str, Tensor] | None = None):
+def quantize_state_dict_int8(
+    state_dict: dict[str, Tensor],
+    activation_stats: dict[str, Tensor] | None = None,
+    gptq_hessians: dict[str, Tensor] | None = None,
+):
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
     # - per-tensor int8 for other float tensors
@@ -845,6 +977,8 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor], activation_stats: di
         0,
     )
     stats.update(transform_stats)
+    stats["gptq_tensors"] = 0
+    gptq_hessians = gptq_hessians or {}
 
     for name, tensor in transformed_state_dict.items():
         t = tensor.detach().to("cpu").contiguous()
@@ -868,7 +1002,12 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor], activation_stats: di
 
         stats["num_float_tensors"] += 1
         export_t, rotation_meta = maybe_rotate_tensor_for_export(name, t)
-        q, s, meta, row_offset = quantize_float_tensor(export_t, num_bits=select_quant_bits(name, export_t))
+        quant_bits = select_quant_bits(name, export_t)
+        if name in gptq_hessians and quant_bits == 8 and export_t.ndim == 2:
+            q, s, meta, row_offset = quantize_matrix_gptq(export_t, gptq_hessians[name])
+            stats["gptq_tensors"] += 1
+        else:
+            q, s, meta, row_offset = quantize_float_tensor(export_t, num_bits=quant_bits)
         if rotation_meta:
             meta = {**meta, **rotation_meta}
         if meta:
@@ -930,6 +1069,8 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor], activation_stats: di
         obj["keep_tok_emb_fp16"] = True
     if INT8_LOWBIT_BITS < 8 and INT8_LOWBIT_TARGET != "none":
         obj["lowbit"] = {"bits": INT8_LOWBIT_BITS, "target": INT8_LOWBIT_TARGET}
+    if INT8_GPTQ_TARGET != "none" and stats["gptq_tensors"] > 0:
+        obj["gptq"] = {"target": INT8_GPTQ_TARGET, "calib_batches": INT8_GPTQ_CALIB_BATCHES, "damp": INT8_GPTQ_DAMP}
     return obj, stats
 
 def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
@@ -1676,6 +1817,11 @@ def main() -> None:
         f"int8_activation_reparam_alpha:{INT8_ACTIVATION_REPARAM_ALPHA} "
         f"int8_activation_reparam_calib_batches:{INT8_ACTIVATION_REPARAM_CALIB_BATCHES}"
     )
+    log0(
+        f"int8_gptq_target:{INT8_GPTQ_TARGET} "
+        f"int8_gptq_calib_batches:{INT8_GPTQ_CALIB_BATCHES} "
+        f"int8_gptq_damp:{INT8_GPTQ_DAMP}"
+    )
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
@@ -1907,7 +2053,22 @@ def main() -> None:
             f"batches:{INT8_ACTIVATION_REPARAM_CALIB_BATCHES}"
         )
 
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict(), activation_stats=activation_reparam_stats)
+    gptq_hessians = collect_gptq_hessians(
+        args,
+        base_model,
+        rank,
+        world_size,
+        device,
+        grad_accum_steps,
+    )
+    if gptq_hessians:
+        log0(f"gptq_calibration: tensors:{len(gptq_hessians)} batches:{INT8_GPTQ_CALIB_BATCHES}")
+
+    quant_obj, quant_stats = quantize_state_dict_int8(
+        base_model.state_dict(),
+        activation_stats=activation_reparam_stats,
+        gptq_hessians=gptq_hessians,
+    )
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
@@ -1923,6 +2084,8 @@ def main() -> None:
             f"Serialized model int8+zlib: {quant_file_bytes} bytes "
             f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
+        if quant_stats["gptq_tensors"] > 0:
+            log0(f"gptq_export: target:{INT8_GPTQ_TARGET} tensors:{quant_stats['gptq_tensors']}")
         log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
 
     if args.skip_final_quant_eval:
