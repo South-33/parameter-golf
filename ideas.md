@@ -47,6 +47,18 @@ When a research pass is run:
 - record which suggestions survived contact with repo evidence
 - end with a short `Prompt delta` so the next pass is sharper than the last one
 
+## Current Snapshot
+
+- Best current local base: shared-core recurrence `9 logical / 3 shared / dim 896`
+- Best confirmed local improvement: about `5.8%` better than the local baseline-style branch on the post-quant proxy
+- Main bottleneck: wider/shared models keep improving before export, then lose too much after int8 roundtrip
+- Strongest active clean branches:
+  - sliding-window eval
+  - `v ↔ proj` equalization
+  - fp16 tied embedding export
+- Strategically strong but deferred here:
+  - tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs
+
 ## Current Research Thesis
 
 - Best current local base: shared-core recurrence (`9 logical / 3 shared / dim 896`) is the strongest branch under the current proxy, not a guaranteed global optimum.

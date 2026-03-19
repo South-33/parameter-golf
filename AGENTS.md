@@ -26,3 +26,11 @@
 - Good wins -> architecture, quantization, tokenizer, or systems changes that improve final post-roundtrip `val_bpb`, preserve artifact viability, and plausibly scale to the real challenge budget -> these are the changes worth spending time on.
 - Weak wins -> local-only speedups, tiny pre-quant gains that vanish after quantization, or tweaks that only help the Windows smoke loop -> do not confuse iteration convenience with challenge progress.
 - Local loop purpose -> use the RTX 4060 8GB setup to reject bad ideas quickly and identify promising ones for later serious runs -> treat local numbers as directional, not authoritative.
+
+## Current Snapshot
+
+- Best current local base -> shared-core recurrence `9 logical / 3 shared / dim 896`.
+- Best confirmed local improvement -> about `5.8%` better than the local baseline-style branch on the post-quant proxy.
+- Main bottleneck -> wider models improve pre-quant quality, then lose too much after int8 export.
+- Strongest active clean branches -> sliding-window eval, `v ↔ proj` equalization, fp16 tied embedding export.
+- Strategically strong but currently deferred -> tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs.
