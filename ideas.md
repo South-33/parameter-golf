@@ -96,11 +96,13 @@ flowchart TD
 ## Prompt Craft
 
 - This is the live prompt-evolution section; after each research pass, update it with what prompt shape worked, what to ask next, and what to avoid repeating.
+- Use a verify-first pass before brainstorming when useful: restate the current best branch, the bottleneck, and the already-tried families, then ask the agent to confirm or reject that summary before generating new ideas.
 - Start from the current best branch and the current bottleneck, then ask for ideas that beat that branch without repeating already-tested families.
 - Ask for mechanism-level novelty first; renamed versions of weak ideas should be treated as repeats unless they change the mechanism.
 - Keep the prompt short, goal-oriented, and explicit about what counts as a useful comparison.
 - Require the agent to return the top ideas plus why they are new, why they target the bottleneck, and the best first experiment.
 - Include the current matchable local headline and any clean external signals so the next agent does not overfit to stale proxy comparisons.
+- If a prompt keeps drifting, give the agent a candidate summary first and ask it to verify or correct it before asking for fresh ideas.
 - After each research pass, record which prompt shape worked, which ideas were genuinely new, and what the next prompt should ask for or avoid.
 
 ### Prompt Checklist
