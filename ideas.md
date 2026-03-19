@@ -128,53 +128,53 @@ When a research pass is run:
 - Latest result: Our tiny smoke tests looked flat, but stronger evidence now points the other way. Official-style PRs show clear gains (`1.1925` in PR #50 with eval-only changes, plus stronger stacked results in PR #53 and PR #65). A follow-up same-checkpoint local comparison on the shared-core `9/3 @ 896` branch with `TRAIN_SEQ_LEN=1024` and `VAL_MAX_TOKENS=65536` improved post-roundtrip `val_bpb` from `3.21166062` to `3.20917860` when switching the final eval from stride `1024` to stride `64`, a small but real `0.0773%` gain.
 - Next step: Treat sliding-window eval as a real lever. Keep the implementation, and if we want a higher-confidence local read, test it on a stronger checkpoint or larger validation slice rather than toy smoke runs.
 
-### 6. Sparse Outlier Sidecar
+### 6. FP16 Tied Embedding / Output Head Export
+- Status: `Testing`
+- Why: The tied embedding doubles as the output head, so protecting it from int8 may remove a disproportionate amount of quantization damage for modest byte cost.
+- Latest result: Strong external evidence from PR #42 says this can nearly eliminate the baseline quant gap. A first same-checkpoint local exporter probe on the saved `9/3 @ 896` checkpoint also moved in the right direction: keeping `tok_emb.weight` in fp16 reduced a tiny 4-sequence proxy loss from `5.35634136` to `5.35576963`, but increased compressed bytes from `8,020,963` to `8,619,404` (`+7.46%`). So the direction looks plausible, but the local gain was small and the byte cost is real.
+- Next step: Keep this as a serious precision-allocation branch, but judge it on fuller same-checkpoint evals and byte tradeoffs rather than tiny proxy loss alone. If continued, test it with mild capacity rebalancing rather than as a pure byte increase.
+
+### 7. Sparse Outlier Sidecar
 - Status: `Unvalidated`
 - Why: Keep the dense int8 core compact and preserve only the most destructive outliers or sensitive coefficients in a tiny high-precision sidecar.
 - Latest result: Newly promoted from research review. It is plausible for the observed width-collapse pattern, but metadata overhead and artifact accounting make it riskier than rotations or scale reparameterization.
 - Next step: Defer until after the fixed-rotation exporter probe; only test if the same-checkpoint outlier concentration looks strong enough to justify side metadata.
 
-### 7. Optimizer-Aware Late Quant Fine-Tune
+### 8. Optimizer-Aware Late Quant Fine-Tune
 - Status: `Unvalidated`
 - Why: Use a short late training phase with a more quantization-friendly optimizer and exact fake quant, rather than relying on naive Muon + fake-quant alone.
 - Latest result: Newly promoted from research review. It is more credible than naive QAT, but also more expensive and harder to validate locally than exporter-only ideas.
 - Next step: Only revisit after export-side ideas, especially if same-checkpoint fixes show that the remaining gap is training-dynamics rather than quantizer geometry.
 
-### 8. Asymmetric Recurrence Topology
+### 9. Asymmetric Recurrence Topology
 - Status: `Unvalidated`
 - Why: Keep three physical blocks but allocate them non-uniformly across logical depth so earlier, more heterogeneous layers specialize more than the later recurrent passes.
 - Latest result: Newly promoted from research review as the most credible architecture-side follow-on to the current shared-core branch.
 - Next step: Keep behind rotation and scale-reparameterization work; only test after the current export bottleneck is better understood.
 
-### 9. Row-Centered Int8 Export
+### 10. Row-Centered Int8 Export
 - Status: `Promising`
 - Why: Subtract the per-row mean before quantizing 2D weights, then add it back on dequantization so symmetric int8 bins are used on the centered residual instead of wasting dynamic range on row bias.
 - Latest result: Same-checkpoint exporter probes on the clean `9/3 @ 1024` control improved post-roundtrip `val_bpb` from `3.46420609` to `3.46273076` with compressed size increasing only from `11,045,085` to `11,081,284` bytes, and the effect repeated on another `1024` checkpoint. But on the stronger `9/3 @ 896` branch it regressed slightly from `3.43772923` to `3.43820288`.
 - Next step: Keep this integrated as an opt-in exporter path and use it selectively on wider shared models where per-row bias seems to be part of the quantization failure mode.
 
-### 10. Per-Row Weight Range Regularization
+### 11. Per-Row Weight Range Regularization
 - Status: `Testing`
 - Why: Penalize large per-row maxima during training so the final per-row int8 export has less dynamic range to destroy.
 - Latest result: `ROW_MAX_PENALTY=1e-4` on `9/3 @ 1024` improved local post-roundtrip `val_bpb` slightly from `3.46424692` to `3.45161882` on a separate short run, but a stronger `3e-4` penalty regressed to `3.48083960`. The branch has signal, but it is not robust enough yet to call a free win.
 - Next step: Leave it below centered export; only revisit with tighter same-checkpoint or longer-run comparisons.
 
-### 11. Quantization-Aware Training Matching Export Path
+### 12. Quantization-Aware Training Matching Export Path
 - Status: `Weak`
 - Why: Train the model to survive the repo's actual int8 + zlib roundtrip so the final scored model loses less quality after export.
 - Latest result: A first naive fake-quant pass on large linear weights with `QAT_START_STEP=10` did not produce a meaningful free win. `9/3 @ 896` improved only trivially from `3.62855` to `3.62825` post-quant bpb on the capped local proxy, while `9/3 @ 960` got worse and `9/3 @ 1024` improved only by noise-level margins.
 - Next step: Leave this aside as a free-win path; revisit only if we redesign QAT more carefully instead of just toggling naive late fake quant or pair it with a different optimizer.
 
-### 12. Grouped Int8 Export (Per-Group Scales)
+### 13. Grouped Int8 Export (Per-Group Scales)
 - Status: `Weak`
 - Why: Give each row multiple scale factors instead of one so wider matrices are quantized more precisely.
 - Latest result: Implemented with `INT8_GROUP_SIZE`. Same-checkpoint comparisons on `9/3 @ 1024` changed post-roundtrip `val_bpb` only from `3.44280567` to `3.44277812`, and on `9/3 @ 1536` it slightly worsened the result while increasing compressed bytes.
 - Next step: Keep the code path available, but deprioritize it behind centered export and other model-side ideas.
-
-### 13. FP16 Tied Embedding / Output Head Export
-- Status: `Unvalidated`
-- Why: The tied embedding doubles as the output head, so protecting it from int8 may remove a disproportionate amount of quantization damage for modest byte cost.
-- Latest result: Strong external evidence from PR #42: keeping the tied embedding in fp16 reportedly cut the quant gap from about `0.007` to `0.0005 BPB` for roughly `~500KB` extra artifact cost, offset by a slightly smaller MLP hidden size. We have not tested this locally.
-- Next step: Treat this as a serious precision-allocation branch; estimate byte cost on our current shared-core model and test whether the quant-gap reduction survives the local proxy.
 
 ### 14. Mixed-Precision Layerwise Export (e.g. int8/int6)
 - Status: `Unvalidated`
@@ -335,3 +335,7 @@ When a research pass is run:
   - the current published Hugging Face `datasets/manifest.json` only exposes `fineweb10B_sp1024`
   - `fineweb10B_sp4096` is therefore not currently available as a cached remote dataset through the helper
 - Current conclusion: the tokenizer branch is still real, but it needs local tokenizer/data re-export rather than a simple cached download.
+- Added an fp16 tied-embedding exporter hook via `INT8_KEEP_TOK_EMB_FP16` and ran a same-checkpoint micro-probe on the saved `9/3 @ 896` checkpoint:
+  - standard int8 export: compressed bytes `8,020,963`, 4-sequence proxy loss `5.35634136`
+  - keep `tok_emb.weight` in fp16: compressed bytes `8,619,404`, 4-sequence proxy loss `5.35576963`
+- Current conclusion: fp16 tied embedding likely helps, but the local gain is small on this checkpoint and the byte tax is non-trivial (`+7.46%`). This stays alive as a precision-allocation branch, but it should be judged on fuller evals and possibly paired with capacity rebalancing.
