@@ -67,6 +67,7 @@ class Hyperparameters:
     # Model shape.
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
     num_layers = int(os.environ.get("NUM_LAYERS", 9))
+    num_shared_blocks = int(os.environ.get("NUM_SHARED_BLOCKS", os.environ.get("NUM_LAYERS", 9)))
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
@@ -652,10 +653,9 @@ class CausalSelfAttention(nn.Module):
         self.c_v = CastedLinear(dim, kv_dim, bias=False)
         self.proj = CastedLinear(dim, dim, bias=False)
         self.proj._zero_init = True
-        self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
         self.rotary = Rotary(self.head_dim, base=rope_base)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, q_gain: Tensor) -> Tensor:
         bsz, seqlen, dim = x.shape
         q = self.c_q(x).reshape(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.c_k(x).reshape(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -665,7 +665,7 @@ class CausalSelfAttention(nn.Module):
         cos, sin = self.rotary(seqlen, x.device, q.dtype)
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
-        q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
+        q = q * q_gain.to(dtype=q.dtype)[None, :, None, None]
         y = F.scaled_dot_product_attention(
             q,
             k,
@@ -707,16 +707,21 @@ class Block(nn.Module):
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
         self.mlp = MLP(dim, mlp_mult)
-        self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
 
-    def forward(self, x: Tensor, x0: Tensor) -> Tensor:
-        mix = self.resid_mix.to(dtype=x.dtype)
+    def forward(
+        self,
+        x: Tensor,
+        x0: Tensor,
+        resid_mix: Tensor,
+        attn_scale: Tensor,
+        mlp_scale: Tensor,
+        q_gain: Tensor,
+    ) -> Tensor:
+        mix = resid_mix.to(dtype=x.dtype)
         x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
-        attn_out = self.attn(self.attn_norm(x))
-        x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * attn_out
-        x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
+        attn_out = self.attn(self.attn_norm(x), q_gain)
+        x = x + attn_scale.to(dtype=x.dtype)[None, None, :] * attn_out
+        x = x + mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
         return x
 
 
@@ -725,6 +730,7 @@ class GPT(nn.Module):
         self,
         vocab_size: int,
         num_layers: int,
+        num_shared_blocks: int,
         model_dim: int,
         num_heads: int,
         num_kv_heads: int,
@@ -738,14 +744,33 @@ class GPT(nn.Module):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
+        if num_shared_blocks <= 0 or num_shared_blocks > num_layers:
+            raise ValueError(
+                f"num_shared_blocks must be in [1, num_layers], got num_shared_blocks={num_shared_blocks}, "
+                f"num_layers={num_layers}"
+            )
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.num_layers = num_layers
+        self.num_shared_blocks = num_shared_blocks
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
+        self.attn_scales = nn.Parameter(torch.ones(num_layers, model_dim, dtype=torch.float32))
+        self.mlp_scales = nn.Parameter(torch.ones(num_layers, model_dim, dtype=torch.float32))
+        self.resid_mixes = nn.Parameter(
+            torch.stack(
+                (
+                    torch.ones(num_layers, model_dim, dtype=torch.float32),
+                    torch.zeros(num_layers, model_dim, dtype=torch.float32),
+                ),
+                dim=1,
+            )
+        )
+        self.q_gains = nn.Parameter(torch.full((num_layers, num_heads), qk_gain_init, dtype=torch.float32))
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -756,7 +781,7 @@ class GPT(nn.Module):
                     rope_base,
                     qk_gain_init,
                 )
-                for i in range(num_layers)
+                for _ in range(num_shared_blocks)
             ]
         )
         self.final_norm = RMSNorm()
@@ -764,6 +789,17 @@ class GPT(nn.Module):
         if self.lm_head is not None:
             self.lm_head._zero_init = True
         self._init_weights()
+
+    def _apply_block(self, logical_idx: int, x: Tensor, x0: Tensor) -> Tensor:
+        block = self.blocks[logical_idx % self.num_shared_blocks]
+        return block(
+            x,
+            x0,
+            self.resid_mixes[logical_idx],
+            self.attn_scales[logical_idx],
+            self.mlp_scales[logical_idx],
+            self.q_gains[logical_idx],
+        )
 
     def _init_weights(self) -> None:
         if self.tie_embeddings:
@@ -780,12 +816,12 @@ class GPT(nn.Module):
 
         # First half stores skips; second half reuses them in reverse order.
         for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, x0)
+            x = self._apply_block(i, x, x0)
             skips.append(x)
         for i in range(self.num_decoder_layers):
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+            x = self._apply_block(self.num_encoder_layers + i, x, x0)
         return x
 
     def _project_logits(self, x: Tensor) -> Tensor:
@@ -931,6 +967,7 @@ def main() -> None:
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
+        num_shared_blocks=args.num_shared_blocks,
         model_dim=args.model_dim,
         num_heads=args.num_heads,
         num_kv_heads=args.num_kv_heads,
@@ -968,6 +1005,14 @@ def main() -> None:
         for name, p in block_named_params
         if p.ndim < 2 or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
     ]
+    scalar_params.extend(
+        [
+            base_model.attn_scales,
+            base_model.mlp_scales,
+            base_model.resid_mixes,
+            base_model.q_gains,
+        ]
+    )
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
@@ -1003,6 +1048,7 @@ def main() -> None:
 
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model_params:{n_params}")
+    log0(f"num_layers:{args.num_layers} num_shared_blocks:{args.num_shared_blocks}")
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0(
         "sdp_backends:"

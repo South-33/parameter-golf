@@ -42,16 +42,16 @@ When an experiment is run:
 ## Ranked Ideas
 
 ### 1. Shared-Core Depth Recurrence With Per-Layer FP32 Controls
-- Status: `Unvalidated`
+- Status: `Promising`
 - Why: Share large block matrices across multiple logical layers, keep tiny per-logical-layer control tensors untied, and trade saved bytes for more effective capacity.
-- Latest result: Not tested yet.
-- Next step: Implement a `NUM_SHARED_BLOCKS` path and compare `9 logical / 3 shared` against the baseline.
+- Latest result: Implemented and tested locally. `9 logical / 3 shared / dim 896` beat the baseline on capped local post-quant validation after 25 steps (`3.6285` vs baseline `3.6465` bpb on `65,536` validation tokens). Wider settings improved pre-quant loss further, but post-quant degradation grew and erased the gain by `dim 1024+`.
+- Next step: Build QAT on top of the shared-core branch, starting with `9 logical / 3 shared / dim 896` as the best current leaderboard-safe candidate.
 
 ### 2. Quantization-Aware Training Matching Export Path
-- Status: `Unvalidated`
+- Status: `Testing`
 - Why: Train the model to survive the repo's actual int8 + zlib roundtrip so the final scored model loses less quality after export.
-- Latest result: Not tested yet.
-- Next step: Add fake quantization for large 2D weights late in training and compare the final post-roundtrip gap.
+- Latest result: Recurrence width scaling now has a clear post-quant bottleneck: `9/3 @ 1024` and `9/3 @ 1536` improved raw local validation but lost too much after the quant roundtrip.
+- Next step: Add fake quantization for large 2D weights late in training and compare the final post-roundtrip gap on the `9/3 @ 896` branch first.
 
 ### 3. Sliding-Window Validation With Overlapping Context
 - Status: `Testing`
@@ -140,3 +140,10 @@ When an experiment is run:
 - Added a Windows-safe local loop: CUDA venv on `D:\venvs\parameter-golf`, Windows-safe math SDP fallback, compile disable switch, local validation cap via `VAL_MAX_TOKENS`, and `SKIP_FINAL_QUANT_EVAL` for fast smoke runs.
 - Verified fast local smoke on the RTX 4060 with `TRAIN_SEQ_LEN=256`, `TRAIN_BATCH_TOKENS=2048`, and `VAL_MAX_TOKENS=65536`; the loop now finishes in seconds instead of waiting on full validation.
 - Implemented sliding-window validation and compared `EVAL_STRIDE_TOKENS=256`, `128`, and `64` on the tiny smoke config; no measurable difference showed up on that toy checkpoint.
+- Implemented shared-core recurrence with per-logical-layer control tensors via `NUM_SHARED_BLOCKS`.
+- Local recurrence sweep summary on capped validation after 25 steps:
+  - baseline `9/9 @ 512`: pre-quant `3.6237`, post-quant `3.6465`
+  - shared `9/3 @ 896`: pre-quant `3.5702`, post-quant `3.6285`
+  - shared `9/3 @ 1024`: pre-quant `3.5653`, post-quant `3.6459`
+  - shared `9/3 @ 1536`: pre-quant `3.5560`, post-quant `3.7418`
+- Current conclusion: shared recurrence is promising, width helps, but quantization becomes the dominant limiter beyond roughly the `896` width range on the local short-run proxy.
