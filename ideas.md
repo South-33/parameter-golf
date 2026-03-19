@@ -125,8 +125,8 @@ When a research pass is run:
 ### 5. Sliding-Window Evaluation With Overlapping Context
 - Status: `Promising`
 - Why: Real challenge runs now show that scoring each token with more context can materially lower final BPB within the separate eval budget.
-- Latest result: Our local proxy smoke tests looked flat, but official-style PRs changed the picture: PR #50 reports `1.1925` on an otherwise baseline model using only `stride=64` sliding-window eval, and PR #65 / PR #53 also stack sliding-window eval into stronger runs. This is now strong external evidence that the local null result was not representative.
-- Next step: Keep the implementation, but stop treating it as a dead end. Revisit it on a closer-to-real checkpoint/config instead of tiny local smoke runs.
+- Latest result: Our tiny smoke tests looked flat, but stronger evidence now points the other way. Official-style PRs show clear gains (`1.1925` in PR #50 with eval-only changes, plus stronger stacked results in PR #53 and PR #65). A follow-up same-checkpoint local comparison on the shared-core `9/3 @ 896` branch with `TRAIN_SEQ_LEN=1024` and `VAL_MAX_TOKENS=65536` improved post-roundtrip `val_bpb` from `3.21166062` to `3.20917860` when switching the final eval from stride `1024` to stride `64`, a small but real `0.0773%` gain.
+- Next step: Treat sliding-window eval as a real lever. Keep the implementation, and if we want a higher-confidence local read, test it on a stronger checkpoint or larger validation slice rather than toy smoke runs.
 
 ### 6. Sparse Outlier Sidecar
 - Status: `Unvalidated`
@@ -322,3 +322,13 @@ When a research pass is run:
     - `vproj`: `3.43604091`
     - `mlp_vproj`: `3.43586773`
 - Current conclusion: this family is more promising than fixed rotations, but the useful part is specifically attention `v ↔ proj` equalization. Exact MLP equalization is unstable across widths and should not be the default continuation.
+- Reviewed stronger public PRs and then reran sliding-window eval on a less toy-like local checkpoint:
+  - current shared-core branch `9/3 @ 896`, `TRAIN_SEQ_LEN=1024`, `VAL_MAX_TOKENS=65536`
+  - same checkpoint final eval:
+    - standard stride `1024`: `3.21166062`
+    - sliding stride `64`: `3.20917860`
+- Current conclusion: the local proxy now agrees directionally with the public PR evidence that sliding-window eval is a real lever, even if the gain on this local checkpoint is much smaller than on 8xH100.
+- Verified tokenizer branch readiness after reviewing PR #53:
+  - existing data scripts already support `sp<VOCAB_SIZE>` variants, including `sp4096`
+  - the local repo only lacked the `sp_bpe_4096` entry in `data/tokenizer_specs.json`
+- Current conclusion: the tokenizer branch is a real next implementation path, not a major pipeline rewrite.

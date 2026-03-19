@@ -49,6 +49,7 @@ class Hyperparameters:
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     eval_stride_tokens = int(os.environ.get("EVAL_STRIDE_TOKENS", os.environ.get("TRAIN_SEQ_LEN", 1024)))
+    final_eval_compare_stride_tokens = int(os.environ.get("FINAL_EVAL_COMPARE_STRIDE_TOKENS", "0"))
     val_max_tokens = int(os.environ.get("VAL_MAX_TOKENS", 0))
     skip_final_quant_eval = bool(int(os.environ.get("SKIP_FINAL_QUANT_EVAL", "0")))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
@@ -389,6 +390,7 @@ INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 INT8_GROUP_SIZE = int(os.environ.get("INT8_GROUP_SIZE", "0"))
 INT8_CENTER_ROWS = bool(int(os.environ.get("INT8_CENTER_ROWS", "0")))
+INT8_KEEP_TOK_EMB_FP16 = bool(int(os.environ.get("INT8_KEEP_TOK_EMB_FP16", "0")))
 INT8_ROTATION_KIND = os.environ.get("INT8_ROTATION_KIND", "none")
 INT8_ROTATION_BLOCK_SIZE = int(os.environ.get("INT8_ROTATION_BLOCK_SIZE", "128"))
 INT8_ROTATION_TARGET = os.environ.get("INT8_ROTATION_TARGET", "all_2d")
@@ -635,7 +637,7 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
 
         # Small float tensors are cheap enough to keep directly. We still downcast
         # fp32/bf16 passthrough tensors to fp16 so metadata does not dominate size.
-        if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
+        if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL or (INT8_KEEP_TOK_EMB_FP16 and name == "tok_emb.weight"):
             kept = keep_float_tensor(name, t, passthrough_orig_dtypes)
             passthrough[name] = kept
             stats["int8_payload_bytes"] += tensor_nbytes(kept)
@@ -693,6 +695,8 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             "mlp_pairs": stats["mlp_pairs"],
             "vproj_pairs": stats["vproj_pairs"],
         }
+    if INT8_KEEP_TOK_EMB_FP16:
+        obj["keep_tok_emb_fp16"] = True
     return obj, stats
 
 def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
@@ -1348,6 +1352,7 @@ def main() -> None:
     log0(f"seed:{args.seed}")
     log0(f"int8_group_size:{INT8_GROUP_SIZE}")
     log0(f"int8_center_rows:{int(INT8_CENTER_ROWS)}")
+    log0(f"int8_keep_tok_emb_fp16:{int(INT8_KEEP_TOK_EMB_FP16)}")
     log0(
         f"int8_rotation_kind:{INT8_ROTATION_KIND} "
         f"int8_rotation_block_size:{INT8_ROTATION_BLOCK_SIZE} "
@@ -1576,6 +1581,35 @@ def main() -> None:
             f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
         )
         log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+        compare_stride = args.final_eval_compare_stride_tokens
+        if 0 < compare_stride <= args.train_seq_len and compare_stride != args.eval_stride_tokens:
+            original_stride = args.eval_stride_tokens
+            args.eval_stride_tokens = compare_stride
+            torch.cuda.synchronize()
+            t_compare = time.perf_counter()
+            c_val_loss, c_val_bpb = eval_val(
+                args,
+                model,
+                rank,
+                world_size,
+                device,
+                grad_accum_steps,
+                val_tokens,
+                base_bytes_lut,
+                has_leading_space_lut,
+                is_boundary_token_lut,
+            )
+            torch.cuda.synchronize()
+            args.eval_stride_tokens = original_stride
+            log0(
+                f"final_int8_zlib_roundtrip_compare stride:{compare_stride} "
+                f"val_loss:{c_val_loss:.4f} val_bpb:{c_val_bpb:.4f} "
+                f"eval_time:{1000.0 * (time.perf_counter() - t_compare):.0f}ms"
+            )
+            log0(
+                f"final_int8_zlib_roundtrip_compare_exact stride:{compare_stride} "
+                f"val_loss:{c_val_loss:.8f} val_bpb:{c_val_bpb:.8f}"
+            )
 
     if distributed:
         dist.destroy_process_group()
