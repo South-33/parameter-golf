@@ -16,9 +16,11 @@
 - Artifact accounting -> the 16,000,000-byte cap includes counted code plus compressed model bytes, and challenge submissions are expected to keep counted code in `train_gpt.py` while record PRs add a new folder under `records/` -> changing only root trainer code is not a valid final submission shape.
 - Evaluation/data -> validation is tokenizer-agnostic BPB on the fixed first-50k-doc `fineweb_val_*` split; tokenizer changes are allowed but scrutinized and must preserve correct byte accounting -> tokenizer bugs can create invalid wins.
 - Tokenizer branch caveat -> the local data helper accepts `sp4096`, but the current published Hugging Face manifest only exposes `sp1024`, so an SP-4096 branch requires local tokenizer/data re-export rather than a simple cached download -> avoids wasting time assuming the higher-vocab dataset is already hosted.
+- Tokenizer artifact accounting -> Issue #43 suggests the tokenizer file itself may not count toward submission bytes, pending maintainer clarification; this makes tokenizer changes strategically stronger than our earlier informal byte model -> do not under-rank tokenizer ideas just because the `.model` file is larger.
 - Tokenizer re-export cost -> the hosted `datasets/docs_selected.jsonl` needed for local tokenizer/data re-export is about `48.17 GB`; prefer `D:` for any tokenizer re-export workspace and treat this as a substantial download/storage decision, not a quick prep step -> avoids accidentally blowing local time or disk on the wrong drive.
 - Exporter direction -> row-centered int8 export is width-sensitive: it consistently helped the local `9/3 @ 1024` branch for ~36 KB extra compressed size, but slightly hurt the current best `9/3 @ 896` branch, while grouped per-row scales were mostly noise -> treat centered export as a recovery tool for wider models, not a blanket default.
-- Research direction -> recent research passes pointed toward rotation/incoherence and scale-reparameterization as promising families, but the fixed Hadamard exporter probe underperformed; the first exact scale-reparameterization pass suggests that `v ↔ proj` equalization has the cleanest signal so far while `relu^2` MLP equalization looks less stable -> treat this as current evidence, not a locked roadmap.
+- Tied embedding precision -> the tied input embedding / output head looks important enough to protect during both training and export; PR #10 adds the useful nuance that it should stay fp32-master during optimization, not only get special treatment at export -> treat tied-embedding precision as a full branch, not just a serializer tweak.
+- Research direction -> recent research passes pointed toward rotation/incoherence and scale-reparameterization as promising families, but the fixed Hadamard exporter probe underperformed; the first exact scale-reparameterization pass suggests that `v <-> proj` equalization has the cleanest signal so far while `relu^2` MLP equalization looks less stable -> treat this as current evidence, not a locked roadmap.
 
 ## Main Goals
 
@@ -33,5 +35,5 @@
 - Best current local base -> shared-core recurrence `9 logical / 3 shared / dim 896`.
 - Best confirmed local improvement -> about `5.8%` better than the local baseline-style branch on the post-quant proxy.
 - Main bottleneck -> wider models improve pre-quant quality, then lose too much after int8 export.
-- Strongest active clean branches -> sliding-window eval, `v ↔ proj` equalization, fp16 tied embedding export.
-- Strategically strong but currently deferred -> tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs.
+- Strongest active clean branches -> sliding-window eval, long-context training + matching long-context eval, `v <-> proj` equalization, and tied-embedding precision handling.
+- Strategically strong but currently deferred -> tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be friendlier than we first assumed.

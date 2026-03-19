@@ -56,9 +56,9 @@ When a research pass is run:
   - sliding-window eval
   - long-context training + matching long-context eval
   - `v ↔ proj` equalization
-  - fp16 tied embedding export
+  - tied-embedding precision handling
 - Strategically strong but deferred here:
-  - tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs
+  - tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be more favorable than we first assumed
 
 ## Current Research Thesis
 
@@ -144,6 +144,33 @@ flowchart TD
   - future PR research should ask whether a branch wins by improving model quality, by improving BPB accounting, or by reallocating artifact bytes more efficiently
   - future prompts should explicitly distinguish "already captured but corroborated" from "genuinely new direction"
 
+### 2026-03-19 - PR audit for `#1` through `#35`
+- Question shape: "Across the early PRs, is there any clean new signal beyond the recurrence / QAT / adapter families we already track?"
+- Sources used: GitHub PR pages and writeups for the low-number PRs that looked substantive.
+- High-signal outcomes:
+  - PR #10 added the only clear new nuance: tied embeddings appear worth protecting during training as an fp32-master parameter, not only at export time
+- Low-signal / repetitive outcomes:
+  - most early recurrence, LoRA, QAT, and SwiGLU PRs overlapped heavily with branches we already tested or already rank
+  - several early PRs were weaker-than-baseline, too WIP, or mainly useful as confirmation that others explored the same families
+- What survived contact with our current evidence:
+  - tied-embedding precision should be treated as a branch that can include both training-side and export-side protection
+  - early PRs do not currently add another top-tier clean branch beyond what is already in memory
+- Prompt delta:
+  - future PR research should spend less time on early recurrence/QAT repetition and more time on mechanism-level deltas that materially change how a familiar family works
+
+### 2026-03-19 - Issue audit
+- Question shape: "Do the repo issues reveal hidden constraints or strategic clarifications that should change our backlog?"
+- Sources used: current GitHub issues, especially open issues and constraint-related threads.
+- High-signal outcomes:
+  - Issue #43 suggests the tokenizer artifact itself may not count toward submission size, which strengthens the tokenizer branch strategically
+- Low-signal outcomes:
+  - environment clarification requests reinforce caution but do not create a new model idea
+  - process/meta issues did not add useful backlog signal
+- What survived contact with our current evidence:
+  - tokenizer work remains locally deferred for cost, but its strategic upside is even stronger than we were informally modeling
+- Prompt delta:
+  - future external research should separate "strategically strong but locally expensive" from "strategically weak"
+
 ## Ranked Ideas
 
 ### 1. Shared-Core Depth Recurrence With Per-Layer FP32 Controls
@@ -167,7 +194,7 @@ flowchart TD
 ### 4. Tokenizer Efficiency (Higher-Vocab SentencePiece)
 - Status: `Unvalidated`
 - Why: A larger tokenizer can directly improve BPB by reducing tokens-per-byte, and public 8xH100 evidence now shows this is not just a theoretical lever.
-- Latest result: Strong external evidence from PR #53: `SP-4096` plus stride-64 sliding window reached `1.1888 val_bpb`, with the PR explicitly attributing a major share of the gain to a better compression ratio (`0.30 tokens/byte vs 0.41`). Repo-side plumbing is mostly ready, but a local check showed the current published Hugging Face manifest still exposes only `sp1024`, so `sp4096` is not a one-command cached download yet.
+- Latest result: Strong external evidence from PR #53: `SP-4096` plus stride-64 sliding window reached `1.1888 val_bpb`, with the PR explicitly attributing a major share of the gain to a better compression ratio (`0.30 tokens/byte vs 0.41`). Repo-side plumbing is mostly ready, but a local check showed the current published Hugging Face manifest still exposes only `sp1024`, so `sp4096` is not a one-command cached download yet. Issue #43 also suggests the tokenizer artifact itself may not count toward submission bytes, which makes this branch strategically stronger than our earlier informal byte model.
 - Next step: Treat this as a serious branch, not a side note, but it is currently deferred on this machine because local tokenizer/data re-export needs the hosted `docs_selected.jsonl` raw docs file (`~48.17 GB`). Revisit when the download/storage/time cost is acceptable or when better hardware/workspace is available.
 
 ### 5. Sliding-Window Evaluation With Overlapping Context
@@ -182,11 +209,11 @@ flowchart TD
 - Latest result: Newly promoted from the PR `#36-#70` audit. PR #65 reported `1.1808 val_bpb` with `TRAIN_SEQ_LEN=4096`, tuned Muon, and matching long-context sliding eval; PR #63 independently reached `1.2067` with `SEQ_LEN=2048` plus fp16 tied embeddings. The clean common thread is that longer context itself appears to survive the real `10 minute / 8xH100` budget.
 - Next step: Treat this as a first-class clean branch. Before implementing anything heavy locally, compare the repo's throughput assumptions and determine whether a smaller local proxy can still test the direction without turning into a misleading speed-only experiment.
 
-### 7. FP16 Tied Embedding / Output Head Export
+### 7. Tied Embedding / Output Head Precision Handling
 - Status: `Testing`
-- Why: The tied embedding doubles as the output head, so protecting it from int8 may remove a disproportionate amount of quantization damage for modest byte cost.
-- Latest result: Strong external evidence from PR #42 says this can nearly eliminate the baseline quant gap. A first same-checkpoint local exporter probe on the saved `9/3 @ 896` checkpoint also moved in the right direction: keeping `tok_emb.weight` in fp16 reduced a tiny 4-sequence proxy loss from `5.35634136` to `5.35576963`, but increased compressed bytes from `8,020,963` to `8,619,404` (`+7.46%`). So the direction looks plausible, but the local gain was small and the byte cost is real.
-- Next step: Keep this as a serious precision-allocation branch, but judge it on fuller same-checkpoint evals and byte tradeoffs rather than tiny proxy loss alone. If continued, test it with mild capacity rebalancing rather than as a pure byte increase.
+- Why: The tied embedding doubles as the output head, so protecting it from low precision may remove a disproportionate amount of damage during both optimization and export.
+- Latest result: Strong external evidence from PR #42 says fp16 export here can nearly eliminate the baseline quant gap, and PR #10 adds a useful training-side nuance: the tied embedding should likely remain an fp32-master parameter during optimization, not only get special treatment at export. A first same-checkpoint local exporter probe on the saved `9/3 @ 896` checkpoint also moved in the right direction: keeping `tok_emb.weight` in fp16 reduced a tiny 4-sequence proxy loss from `5.35634136` to `5.35576963`, but increased compressed bytes from `8,020,963` to `8,619,404` (`+7.46%`).
+- Next step: Keep this as a serious precision-allocation branch, but judge it on fuller same-checkpoint evals and byte tradeoffs rather than tiny proxy loss alone. If continued, test it as a combined training-side + export-side precision branch with mild capacity rebalancing rather than as a pure byte increase.
 
 ### 8. Sparse Outlier Sidecar
 - Status: `Unvalidated`
