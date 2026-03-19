@@ -72,6 +72,8 @@ class Hyperparameters:
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = int(os.environ.get("MLP_MULT", 2))
+    mlp_kind = os.environ.get("MLP_KIND", "relu2")
+    mlp_hidden = int(os.environ.get("MLP_HIDDEN", "0"))
     adapter_rank = int(os.environ.get("ADAPTER_RANK", 0))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
@@ -761,15 +763,25 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    # relu^2 MLP from the original modded-nanogpt setup
-    def __init__(self, dim: int, mlp_mult: int):
+    # Default relu^2 MLP from the original modded-nanogpt setup, with an opt-in
+    # SwiGLU path that keeps parameter count in the same ballpark.
+    def __init__(self, dim: int, mlp_mult: int, mlp_kind: str, mlp_hidden: int):
         super().__init__()
-        hidden = mlp_mult * dim
+        if mlp_kind not in {"relu2", "swiglu"}:
+            raise ValueError(f"Unsupported mlp_kind={mlp_kind!r}")
+        self.mlp_kind = mlp_kind
+        hidden = mlp_hidden
+        if hidden <= 0:
+            hidden = mlp_mult * dim if mlp_kind == "relu2" else max(1, (2 * mlp_mult * dim) // 3)
+        self.hidden = hidden
         self.fc = CastedLinear(dim, hidden, bias=False)
+        self.gate = CastedLinear(dim, hidden, bias=False) if mlp_kind == "swiglu" else None
         self.proj = CastedLinear(hidden, dim, bias=False)
         self.proj._zero_init = True
 
     def forward(self, x: Tensor) -> Tensor:
+        if self.mlp_kind == "swiglu":
+            return self.proj(F.silu(self.gate(x)) * self.fc(x))
         x = torch.relu(self.fc(x))
         return self.proj(x.square())
 
@@ -792,6 +804,8 @@ class Block(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         mlp_mult: int,
+        mlp_kind: str,
+        mlp_hidden: int,
         rope_base: float,
         qk_gain_init: float,
     ):
@@ -799,7 +813,7 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
-        self.mlp = MLP(dim, mlp_mult)
+        self.mlp = MLP(dim, mlp_mult, mlp_kind, mlp_hidden)
 
     def forward(
         self,
@@ -828,6 +842,8 @@ class GPT(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         mlp_mult: int,
+        mlp_kind: str,
+        mlp_hidden: int,
         adapter_rank: int,
         tie_embeddings: bool,
         tied_embed_init_std: float,
@@ -848,6 +864,8 @@ class GPT(nn.Module):
         self.logit_softcap = logit_softcap
         self.num_layers = num_layers
         self.num_shared_blocks = num_shared_blocks
+        self.mlp_kind = mlp_kind
+        self.mlp_hidden = mlp_hidden
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -877,6 +895,8 @@ class GPT(nn.Module):
                     num_heads,
                     num_kv_heads,
                     mlp_mult,
+                    mlp_kind,
+                    mlp_hidden,
                     rope_base,
                     qk_gain_init,
                 )
@@ -1077,6 +1097,8 @@ def main() -> None:
         num_heads=args.num_heads,
         num_kv_heads=args.num_kv_heads,
         mlp_mult=args.mlp_mult,
+        mlp_kind=args.mlp_kind,
+        mlp_hidden=args.mlp_hidden,
         tie_embeddings=args.tie_embeddings,
         tied_embed_init_std=args.tied_embed_init_std,
         logit_softcap=args.logit_softcap,
@@ -1171,6 +1193,7 @@ def main() -> None:
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
+    log0(f"mlp_kind:{args.mlp_kind} mlp_mult:{args.mlp_mult} mlp_hidden:{args.mlp_hidden}")
     log0(f"adapter_rank:{args.adapter_rank}")
     log0(f"row_max_penalty:{args.row_max_penalty}")
     log0(f"seed:{args.seed}")

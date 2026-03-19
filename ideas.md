@@ -84,10 +84,10 @@ When an experiment is run:
 - Next step: Factorize only selected attention projections first and measure artifact-size headroom before widening.
 
 ### 8. SwiGLU Replacement For ReLU^2 MLP
-- Status: `Unvalidated`
+- Status: `Weak`
 - Why: Better quality-per-parameter is plausible at this scale if the extra compute cost is acceptable.
-- Latest result: Not tested yet.
-- Next step: Swap the MLP to SwiGLU at near-matched parameter count and compare both step time and post-roundtrip score.
+- Latest result: Added an opt-in `MLP_KIND=swiglu` path with a near-parameter-matched hidden size. On `9/3 @ 896` it was clearly worse than the current `relu2` branch: post-roundtrip `3.43765442 -> 3.50506778`.
+- Next step: Do not keep tuning this blindly on the current local proxy; only revisit if a later idea specifically suggests why SwiGLU should become more quant-stable under a different optimizer or training regime.
 
 ### 9. Custom Low-Bit Export Format (INT4 / Mixed Precision Packing)
 - Status: `Unvalidated`
@@ -193,3 +193,6 @@ When an experiment is run:
 - Added a follow-up probe on the current best `9/3 @ 896` checkpoint:
   - `3.43772923 -> 3.43820288`, compressed size `8,883,503 -> 8,914,637` bytes
 - Current conclusion: centered export is a real width-recovery tool for the `1024` branch, but not a universal default for the best current `896` branch.
+- Added an opt-in SwiGLU MLP path via `MLP_KIND=swiglu` with near-matched hidden size.
+  - `9/3 @ 896`: post-quant `3.43765442 -> 3.50506778`
+- Current conclusion: the first SwiGLU branch is clearly worse on the best current shared-core model and should not be tuned further as a free win.
