@@ -52,10 +52,12 @@ When a research pass is run:
 - Best current local base: shared-core recurrence (`9 logical / 3 shared / dim 896`) is the strongest branch under the current proxy, not a guaranteed global optimum.
 - Main observed bottleneck: post-quant collapse, especially when width moves beyond the current local sweet spot.
 - Current strongest surviving sub-signal: attention `v ↔ proj` equalization; exact MLP equalization has looked less stable across widths.
+- Strong external signal from real 8xH100 PRs: sliding-window eval and tokenizer efficiency matter more than the local 4060 proxy suggested, so local null results there should not be over-weighted.
 - Current research bias, subject to revision:
   1. quantization-stable architecture or parameterization changes that preserve the recurrence gain
-  2. exporter or equivalent-transform ideas with same-checkpoint measurable effect
-  3. more invasive training-dynamics ideas if simpler geometry/export fixes stop paying off
+  2. tokenizer or evaluation changes that already show clean gains on real challenge runs
+  3. exporter or equivalent-transform ideas with same-checkpoint measurable effect
+  4. more invasive training-dynamics ideas if simpler geometry/export fixes stop paying off
 
 ## Research Log
 
@@ -77,6 +79,23 @@ When a research pass is run:
   - future research prompts should mention that fixed rotations, simple SwiGLU, naive QAT, grouped export, and generic eval tweaks have already shown weak or mixed evidence here
   - future prompts should ask for ideas that plausibly beat the current shared-core base without assuming exporter-only tweaks are sufficient
 
+### 2026-03-19 - Public PR review against current backlog
+- Question shape: "Which open PR ideas are both real on the official challenge setup and aligned with our no-loophole direction?"
+- Sources used: current GitHub PR pages and submission summaries.
+- High-signal outcomes:
+  - real 8xH100 evidence says sliding-window eval with `stride=64` is materially useful, even if the local proxy did not show it
+  - tokenizer efficiency is a first-class branch now; SP-4096 plus sliding window reached `1.1888` in PR #53
+  - precision allocation at export matters in practice: fp16 tied embeddings and mixed int8/int6 both showed real gains on official-style runs
+- Low-signal / out-of-scope outcomes:
+  - val-only training can post extreme numbers, but it does not match the current no-hacks direction
+  - broad "systematic tuning" writeups without a sharp mechanism are weaker as idea sources
+- What survived contact with our current evidence:
+  - recurrence is still a strong local base, but it is no longer the only top-tier direction
+  - the backlog was underweighting tokenizer and real-eval ideas because the 4060 proxy was not representative enough
+- Prompt delta:
+  - future research prompts should ask for leaderboard-safe ideas that have already shown signal on real 8xH100 runs, especially tokenizer and precision-allocation mechanisms
+  - future prompts should separate "local proxy looked weak" from "real challenge evidence looked weak"
+
 ## Ranked Ideas
 
 ### 1. Shared-Core Depth Recurrence With Per-Layer FP32 Controls
@@ -97,109 +116,121 @@ When a research pass is run:
 - Latest result: Implemented an export-only blockwise Hadamard path and tested it on same checkpoints. On `9/3 @ 896`, post-roundtrip `val_bpb` regressed from `3.45475773` to `3.45520042` while compressed size rose from `8,836,228` to `8,904,542` bytes. On `9/3 @ 1024`, it improved from `3.44899903` to `3.44652087`, but that is only about `0.072%` better, below the `0.1%` promotion threshold, with compressed size still rising from `11,066,108` to `11,142,110` bytes.
 - Next step: Leave fixed rotations below stronger options for now. Revisit only if a later learned-rotation or basis-learning branch becomes compelling enough to justify a more invasive implementation.
 
-### 4. Sparse Outlier Sidecar
+### 4. Tokenizer Efficiency (Higher-Vocab SentencePiece)
+- Status: `Unvalidated`
+- Why: A larger tokenizer can directly improve BPB by reducing tokens-per-byte, and public 8xH100 evidence now shows this is not just a theoretical lever.
+- Latest result: Strong external evidence from PR #53: `SP-4096` plus stride-64 sliding window reached `1.1888 val_bpb`, with the PR explicitly attributing a major share of the gain to a better compression ratio (`0.30 tokens/byte vs 0.41`). We have not tested tokenizer changes locally yet.
+- Next step: Treat this as a serious branch, not a side note. Before implementation, estimate artifact pressure, embedding cost, and what minimal tokenizer pipeline changes are needed to keep byte accounting correct.
+
+### 5. Sliding-Window Evaluation With Overlapping Context
+- Status: `Promising`
+- Why: Real challenge runs now show that scoring each token with more context can materially lower final BPB within the separate eval budget.
+- Latest result: Our local proxy smoke tests looked flat, but official-style PRs changed the picture: PR #50 reports `1.1925` on an otherwise baseline model using only `stride=64` sliding-window eval, and PR #65 / PR #53 also stack sliding-window eval into stronger runs. This is now strong external evidence that the local null result was not representative.
+- Next step: Keep the implementation, but stop treating it as a dead end. Revisit it on a closer-to-real checkpoint/config instead of tiny local smoke runs.
+
+### 6. Sparse Outlier Sidecar
 - Status: `Unvalidated`
 - Why: Keep the dense int8 core compact and preserve only the most destructive outliers or sensitive coefficients in a tiny high-precision sidecar.
 - Latest result: Newly promoted from research review. It is plausible for the observed width-collapse pattern, but metadata overhead and artifact accounting make it riskier than rotations or scale reparameterization.
 - Next step: Defer until after the fixed-rotation exporter probe; only test if the same-checkpoint outlier concentration looks strong enough to justify side metadata.
 
-### 5. Optimizer-Aware Late Quant Fine-Tune
+### 7. Optimizer-Aware Late Quant Fine-Tune
 - Status: `Unvalidated`
 - Why: Use a short late training phase with a more quantization-friendly optimizer and exact fake quant, rather than relying on naive Muon + fake-quant alone.
 - Latest result: Newly promoted from research review. It is more credible than naive QAT, but also more expensive and harder to validate locally than exporter-only ideas.
 - Next step: Only revisit after export-side ideas, especially if same-checkpoint fixes show that the remaining gap is training-dynamics rather than quantizer geometry.
 
-### 6. Asymmetric Recurrence Topology
+### 8. Asymmetric Recurrence Topology
 - Status: `Unvalidated`
 - Why: Keep three physical blocks but allocate them non-uniformly across logical depth so earlier, more heterogeneous layers specialize more than the later recurrent passes.
 - Latest result: Newly promoted from research review as the most credible architecture-side follow-on to the current shared-core branch.
 - Next step: Keep behind rotation and scale-reparameterization work; only test after the current export bottleneck is better understood.
 
-### 7. Row-Centered Int8 Export
+### 9. Row-Centered Int8 Export
 - Status: `Promising`
 - Why: Subtract the per-row mean before quantizing 2D weights, then add it back on dequantization so symmetric int8 bins are used on the centered residual instead of wasting dynamic range on row bias.
 - Latest result: Same-checkpoint exporter probes on the clean `9/3 @ 1024` control improved post-roundtrip `val_bpb` from `3.46420609` to `3.46273076` with compressed size increasing only from `11,045,085` to `11,081,284` bytes, and the effect repeated on another `1024` checkpoint. But on the stronger `9/3 @ 896` branch it regressed slightly from `3.43772923` to `3.43820288`.
 - Next step: Keep this integrated as an opt-in exporter path and use it selectively on wider shared models where per-row bias seems to be part of the quantization failure mode.
 
-### 8. Per-Row Weight Range Regularization
+### 10. Per-Row Weight Range Regularization
 - Status: `Testing`
 - Why: Penalize large per-row maxima during training so the final per-row int8 export has less dynamic range to destroy.
 - Latest result: `ROW_MAX_PENALTY=1e-4` on `9/3 @ 1024` improved local post-roundtrip `val_bpb` slightly from `3.46424692` to `3.45161882` on a separate short run, but a stronger `3e-4` penalty regressed to `3.48083960`. The branch has signal, but it is not robust enough yet to call a free win.
 - Next step: Leave it below centered export; only revisit with tighter same-checkpoint or longer-run comparisons.
 
-### 9. Quantization-Aware Training Matching Export Path
+### 11. Quantization-Aware Training Matching Export Path
 - Status: `Weak`
 - Why: Train the model to survive the repo's actual int8 + zlib roundtrip so the final scored model loses less quality after export.
 - Latest result: A first naive fake-quant pass on large linear weights with `QAT_START_STEP=10` did not produce a meaningful free win. `9/3 @ 896` improved only trivially from `3.62855` to `3.62825` post-quant bpb on the capped local proxy, while `9/3 @ 960` got worse and `9/3 @ 1024` improved only by noise-level margins.
 - Next step: Leave this aside as a free-win path; revisit only if we redesign QAT more carefully instead of just toggling naive late fake quant or pair it with a different optimizer.
 
-### 10. Grouped Int8 Export (Per-Group Scales)
+### 12. Grouped Int8 Export (Per-Group Scales)
 - Status: `Weak`
 - Why: Give each row multiple scale factors instead of one so wider matrices are quantized more precisely.
 - Latest result: Implemented with `INT8_GROUP_SIZE`. Same-checkpoint comparisons on `9/3 @ 1024` changed post-roundtrip `val_bpb` only from `3.44280567` to `3.44277812`, and on `9/3 @ 1536` it slightly worsened the result while increasing compressed bytes.
 - Next step: Keep the code path available, but deprioritize it behind centered export and other model-side ideas.
 
-### 11. Sliding-Window Validation With Overlapping Context
-- Status: `Weak`
-- Why: Use the allowed eval-time budget to score tokens with more context than the current non-overlapping windows.
-- Latest result: Implemented and smoke-tested locally; on tiny local checks it produced no measurable difference, and it never became a convincing free win.
-- Next step: Leave implemented but do not spend more time here until a stronger checkpoint suggests otherwise.
+### 13. FP16 Tied Embedding / Output Head Export
+- Status: `Unvalidated`
+- Why: The tied embedding doubles as the output head, so protecting it from int8 may remove a disproportionate amount of quantization damage for modest byte cost.
+- Latest result: Strong external evidence from PR #42: keeping the tied embedding in fp16 reportedly cut the quant gap from about `0.007` to `0.0005 BPB` for roughly `~500KB` extra artifact cost, offset by a slightly smaller MLP hidden size. We have not tested this locally.
+- Next step: Treat this as a serious precision-allocation branch; estimate byte cost on our current shared-core model and test whether the quant-gap reduction survives the local proxy.
 
-### 12. Low-Rank Factorization Of Selected Large Matrices
+### 14. Mixed-Precision Layerwise Export (e.g. int8/int6)
+- Status: `Unvalidated`
+- Why: Different layers may deserve different export precision; public evidence suggests precision allocation can buy quality without breaking the artifact cap.
+- Latest result: Strong external evidence from PR #39: a `10-layer` model with `int8` outer layers and `int6` middle layers reached about `1.2139` mean `val_bpb` across 5 seeds under the real budget, improving the baseline while staying under `16MB`.
+- Next step: Keep this as a credible export branch, but only test it after simpler precision-allocation ideas such as fp16 tied embeddings or targeted equalization.
+
+### 15. Low-Rank Factorization Of Selected Large Matrices
 - Status: `Unvalidated`
 - Why: Reduce parameter bytes in the largest projections, then reinvest the saved budget into width or depth.
 - Latest result: Not tested yet.
 - Next step: Factorize only selected attention projections first and measure artifact-size headroom before widening.
 
-### 13. SwiGLU Replacement For ReLU^2 MLP
+### 16. SwiGLU Replacement For ReLU^2 MLP
 - Status: `Weak`
 - Why: Better quality-per-parameter is plausible at this scale if the extra compute cost is acceptable.
 - Latest result: Added an opt-in `MLP_KIND=swiglu` path with a near-parameter-matched hidden size. On `9/3 @ 896` it was clearly worse than the current `relu2` branch: post-roundtrip `3.43765442 -> 3.50506778`.
 - Next step: Do not keep tuning this blindly on the current local proxy; only revisit if a later idea specifically suggests why SwiGLU should become more quant-stable under a different optimizer or training regime.
 
-### 14. Custom Low-Bit Export Format (INT4 / Mixed Precision Packing)
+### 17. Custom Low-Bit Export Format (INT4 / Mixed Precision Packing)
 - Status: `Unvalidated`
 - Why: Shrink stored weight bytes beyond the current int8 export and fit more effective capacity under the artifact cap.
 - Latest result: Not tested yet.
 - Next step: Prototype serialization only, measure compressed bytes, and defer model-quality work until the size win is real.
 
-### 15. Low-Rank Residual Adapters On Shared Blocks
+### 18. Low-Rank Residual Adapters On Shared Blocks
 - Status: `Weak`
 - Why: Add tiny per-logical-layer float adapter paths so shared blocks can correct recurrence/quantization drift without paying for full untied layers.
 - Latest result: A first `ADAPTER_RANK=8` test on `9/3 @ 1024` was decisively bad, jumping local post-roundtrip `val_bpb` to `3.86195309`.
 - Next step: Do not sweep adapter ranks blindly; only revisit if we redesign the adapter placement or optimizer treatment.
 
-### 16. Factorized Embeddings With Larger Tokenizer Vocabulary
-- Status: `Unvalidated`
-- Why: Attack `val_bpb` through tokenizer efficiency while containing embedding cost with factorization.
-- Latest result: Not tested yet.
-- Next step: Estimate token-count reduction and embedding-byte cost before changing the tokenizer pipeline.
-
-### 17. Aggressive Compression-Aware Parameterization
+### 19. Aggressive Compression-Aware Parameterization
 - Status: `Unvalidated`
 - Why: Bias training toward lower-entropy, more quantization-friendly, more zlib-friendly weights instead of treating compression as a final afterthought.
 - Latest result: Not tested yet.
 - Next step: Revisit after QAT results; merge if the techniques overlap too much.
 
-### 18. Mostly-Shared Base Weights Plus Small Untied Control Paths
+### 20. Mostly-Shared Base Weights Plus Small Untied Control Paths
 - Status: `Unvalidated`
 - Why: Push capacity into large shared tensors and keep behavior flexible with cheap high-precision control tensors.
 - Latest result: Not tested yet.
 - Next step: Keep separate only if it diverges materially from the recurrence design.
 
-### 19. Local Cache / Copy / n-gram Auxiliary Head For Web Text
+### 21. Local Cache / Copy / n-gram Auxiliary Head For Web Text
 - Status: `Unvalidated`
 - Why: FineWeb likely has local repetitive structure that tiny dense models underuse.
 - Latest result: Not tested yet.
 - Next step: Only revisit after the main architecture path is measured.
 
-### 20. Magnitude Pruning For Better Zlib Compression
+### 22. Magnitude Pruning For Better Zlib Compression
 - Status: `Unvalidated`
 - Why: Force exact zeros and hope compression gains outweigh model-quality losses.
 - Latest result: Not tested yet.
 - Next step: Defer until stronger byte-saving methods are exhausted.
 
-### 21. Persistent Validation KV Cache Across Chunks
+### 23. Persistent Validation KV Cache Across Chunks
 - Status: `Rejected`
 - Why: Likely too rule-sensitive for the first serious leaderboard-safe path.
 - Latest result: Rejected on legitimacy grounds before implementation.
