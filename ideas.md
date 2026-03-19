@@ -153,7 +153,10 @@ flowchart TD
   - activation-aware `vproj`, `alpha=0.25`, `batches=2`: `3.61906591`, compressed size `6,572,517`
   - activation-aware `vproj`, `alpha=0.5`, `batches=2`: `3.60947320`, compressed size `6,555,412`
   - activation-aware `vproj`, `alpha=1.0`, `batches=2`: `3.62248382`, compressed size `6,628,506`
-  Moderate activation-aware scaling is the first clean follow-up that improved on same-code weight-only `vproj`, while stronger scaling hurt.
+  Moderate activation-aware scaling was the first follow-up that improved on same-code weight-only `vproj`, while stronger scaling hurt. But a later fresh matched confirmation pair did not hold:
+  - fresh control `vproj`: `3.54559696`, compressed size `6,114,857`
+  - fresh activation-aware `vproj`, `alpha=0.5`, `batches=2`: `3.59204520`, compressed size `6,373,840`
+  So the branch currently looks noisy on the short local loop rather than promoted.
 
 ## Ranked Ideas
 
@@ -164,14 +167,17 @@ flowchart TD
 - Next step: Treat this as the current reference architecture and compare new ideas against it unless fresh evidence points to a better base.
 
 ### 2. Scale Reparameterization / Equivalent Transforms
-- Status: `Promising`
+- Status: `Testing`
 - Why: Reparameterize adjacent layers so difficult activation or weight scales are migrated into more quantization-friendly forms without changing the represented function.
-- Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc <-> proj` pairs and attention `v <-> proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`. A new train-data-only activation-aware follow-up on the current widened branch also beat same-code weight-only `vproj` when kept moderate:
+- Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc <-> proj` pairs and attention `v <-> proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`. A new train-data-only activation-aware follow-up on the current widened branch briefly beat same-code weight-only `vproj` when kept moderate:
   - weight-only `vproj`: `3.61809600`, compressed size `6,560,717`
   - activation-aware `vproj`, `alpha=0.5`, `batches=2`: `3.60947320`, compressed size `6,555,412`
   - weaker `alpha=0.25`: `3.61906591`
   - stronger `alpha=1.0`: `3.62248382`
-- Next step: Treat attention `vproj` as the real continuation of this family. Keep follow-ups focused on moderate activation-aware `vproj` settings or stronger reconstruction-style calibration, and do not revive bundled MLP equalization as the default.
+- But a fresh matched confirmation pair then went the other way:
+  - fresh control `vproj`: `3.54559696`, compressed size `6,114,857`
+  - fresh activation-aware `vproj`, `alpha=0.5`, `batches=2`: `3.59204520`, compressed size `6,373,840`
+- Next step: Treat weight-only attention `vproj` as the current stable part of this family. Do not promote activation-aware `vproj` yet; either confirm it with better determinism or move on to stronger quant-calibration ideas such as adaptive clipping or GPTQ-style reconstruction.
 
 ### 2a. Moderate MLP Widening On The Shared-Core Base
 - Status: `Promising`
