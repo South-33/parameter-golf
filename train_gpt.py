@@ -952,6 +952,11 @@ class Rotary(nn.Module):
         self._cos_cached: Tensor | None = None
         self._sin_cached: Tensor | None = None
 
+    def _build_cache(self, seq_len: int, device: torch.device) -> tuple[Tensor, Tensor]:
+        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq.to(device))
+        return freqs.cos()[None, None, :, :], freqs.sin()[None, None, :, :]
+
     def forward(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
         if (
             self._cos_cached is None
@@ -959,10 +964,11 @@ class Rotary(nn.Module):
             or self._seq_len_cached != seq_len
             or self._cos_cached.device != device
         ):
-            t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
-            freqs = torch.outer(t, self.inv_freq.to(device))
-            self._cos_cached = freqs.cos()[None, None, :, :]
-            self._sin_cached = freqs.sin()[None, None, :, :]
+            # Validation runs under torch.inference_mode(). If we populate the cache there,
+            # later training can trip autograd by reusing inference tensors. Build/cache the
+            # tables with inference mode temporarily disabled so the cached tensors stay safe.
+            with torch.inference_mode(False):
+                self._cos_cached, self._sin_cached = self._build_cache(seq_len, device)
             self._seq_len_cached = seq_len
         return self._cos_cached.to(dtype=dtype), self._sin_cached.to(dtype=dtype)
 

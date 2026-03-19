@@ -61,6 +61,8 @@ When a research pass is run:
   - kurtosis-penalized MLP training
   - `v <-> proj` equalization
   - tied-embedding precision handling
+- Best current kurtosis setting on the fixed code path:
+  - `KURTOSIS_PENALTY=1e-5` is the strongest confirmed local setting so far; `3e-5` still helps, while `1e-4` clearly over-regularizes and collapses the short-run result
 - Strategically strong but deferred here:
   - tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be more favorable than we first assumed
   - longer-context training (`2048+`) because public PR evidence is strong but the short 4060 proxy looked locally unattractive
@@ -138,6 +140,11 @@ flowchart TD
 - Sources used: targeted repo-aware subagent ideation focused on the current widened shared-core branch.
 - Result: kurtosis-aware MLP regularization is the clearest new training-dynamics idea; component-decoupled sharing and per-block warmdown calibration are the strongest follow-ons if we keep pushing the current family.
 
+### 2026-03-19 - Kurtosis follow-up after fixing the local eval-to-train cache bug
+- Question shape: "Is the kurtosis branch still real once the local loop is rerun cleanly on the fixed code path?"
+- Sources used: direct local reruns on the current widened shared-core branch after fixing RoPE cache reuse across `torch.inference_mode()` validation and later training.
+- Result: yes. `KURTOSIS_PENALTY=1e-5` is the clean winner on the fixed path, `3e-5` still helps, and `1e-4` is clearly too strong.
+
 ## Ranked Ideas
 
 ### 1. Shared-Core Depth Recurrence With Per-Layer FP32 Controls
@@ -163,14 +170,15 @@ flowchart TD
 - Next step: Treat `MLP_HIDDEN=2304` as the leading follow-on branch from the current shared-core base. Nearby checks at `2176` (`3.59427578`) and `2432` (`3.58679594`) were both worse, so there is no reason to keep sweeping this width range blindly.
 
 ### 2b. Kurtosis-Penalized MLP Training
-- Status: `Testing`
+- Status: `Promising`
 - Why: Penalize excess kurtosis in MLP weight rows during training so the widened shared-core branch learns smoother, less heavy-tailed weight distributions that survive per-row int8 export better.
-- Latest result: Added `KURTOSIS_PENALTY` as an MLP-only training regularizer and tested it on the current widened branch (`9/3 @ 896`, `MLP_HIDDEN=2304`) under the same short 10-step stride-64 post-quant setup:
-  - same-code control `KURTOSIS_PENALTY=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.57991740`, compressed size `6,237,578`
-  - `KURTOSIS_PENALTY=1e-5`: `3.57012118`, compressed size `6,207,818`
-  - `KURTOSIS_PENALTY=3e-5`: `3.56901227`, compressed size `6,208,211`
-  This is a real same-code local improvement signal, but the short proxy is noisy enough that it should not yet replace the broader current-best branch headline.
-- Next step: Keep this active. If continued, try one stronger-but-still-safe value (for example `1e-4`) or rerun the best current setting to confirm the gain is robust rather than one noisy good draw.
+- Latest result: Added `KURTOSIS_PENALTY` as an MLP-only training regularizer and reran it cleanly on the current widened branch (`9/3 @ 896`, `MLP_HIDDEN=2304`) after fixing a local RoPE cache bug that could poison training after step-0 validation. Under the same short 10-step stride-64 post-quant setup:
+  - fixed-path same-code control `KURTOSIS_PENALTY=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.56176579`, compressed size `6,087,863`
+  - fixed-path `KURTOSIS_PENALTY=1e-5`: `3.54295889`, compressed size `5,927,262`
+  - fixed-path `KURTOSIS_PENALTY=3e-5`: `3.54789266`, compressed size `6,083,427`
+  - fixed-path `KURTOSIS_PENALTY=1e-4`: `3.78083123`, compressed size `5,791,697`
+  The branch held up after the bug fix. `1e-5` is the current best value and is about `0.53%` better than the matched fixed-path control; `3e-5` still helps, while `1e-4` is clearly too strong.
+- Next step: Keep this branch active. If continued, do one more clean confirmation of `1e-5` against control or use `1e-5` as the default kurtosis setting while testing the next architecture-side branch.
 
 ### 2c. Component-Decoupled Sharing (Shared Attention, Less-Shared MLP)
 - Status: `Unvalidated`
@@ -455,3 +463,10 @@ flowchart TD
   - `KURTOSIS_PENALTY=1e-5`: `3.57012118`, compressed size `6,207,818`
   - `KURTOSIS_PENALTY=3e-5`: `3.56901227`, compressed size `6,208,211`
 - Current conclusion: kurtosis regularization is the first new post-agent idea that showed a clean same-code local gain on the widened branch, but the short 10-step proxy is noisy enough that it should be treated as a promising signal, not final proof.
+- Fixed a real local loop bug in RoPE cache handling: step-0 validation under `torch.inference_mode()` could populate cached rotary tensors that later broke training autograd on the same process.
+- Reran the widened kurtosis branch on the fixed path with `VAL_MAX_TOKENS=16384` restored for matched short-run comparisons:
+  - fixed-path control `KURTOSIS_PENALTY=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.56176579`, compressed size `6,087,863`
+  - fixed-path `KURTOSIS_PENALTY=1e-5`: `3.54295889`, compressed size `5,927,262`
+  - fixed-path `KURTOSIS_PENALTY=3e-5`: `3.54789266`, compressed size `6,083,427`
+  - fixed-path `KURTOSIS_PENALTY=1e-4`: `3.78083123`, compressed size `5,791,697`
+- Current conclusion: the branch survives the bug fix. `1e-5` is the current best kurtosis setting on the matched fixed code path, `3e-5` still helps, and `1e-4` is clearly too strong.
