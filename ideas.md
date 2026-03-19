@@ -48,10 +48,10 @@ When an experiment is run:
 - Next step: Treat this as the base architecture and pair it with post-quant robustness work, especially centered export.
 
 ### 2. Scale Reparameterization / Equivalent Transforms
-- Status: `Unvalidated`
+- Status: `Testing`
 - Why: Reparameterize adjacent layers so difficult activation or weight scales are migrated into more quantization-friendly forms without changing the represented function.
-- Latest result: Promoted by multiple research passes as the strongest surviving new family after the fixed-rotation exporter probe underperformed. This is broader and more mathematically grounded than the row-centering and row-max penalty probes we already tried.
-- Next step: Build a small equivalent-transform branch such as per-channel scale migration on the biggest attention and MLP projections.
+- Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc ↔ proj` pairs and attention `v ↔ proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`.
+- Next step: Treat exact `v ↔ proj` equalization as the surviving sub-idea. If this branch is continued, test a narrow `vproj`-only sweep or learned/activation-aware scale migration, not the bundled MLP equalization.
 
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
@@ -237,3 +237,19 @@ When an experiment is run:
   - `9/3 @ 896`: post-quant `3.45475773 -> 3.45520042`, compressed size `8,836,228 -> 8,904,542`
   - `9/3 @ 1024`: post-quant `3.44899903 -> 3.44652087`, compressed size `11,066,108 -> 11,142,110`
 - Current conclusion: fixed blockwise Hadamard export is a real but too-small width-recovery effect. It misses the `0.1%` improvement bar, so the next serious branch should move to scale reparameterization / equivalent transforms instead of escalating fixed rotations.
+- Implemented an exact exporter-only scale-reparameterization path with `INT8_SCALE_REPARAM_KIND` and `INT8_SCALE_REPARAM_CLAMP`.
+- Verified functionally that both supported exact transforms preserve outputs to numerical precision:
+  - `relu^2` MLP `fc ↔ proj`
+  - attention `v ↔ proj` under GQA-aware channel repetition
+- Same-checkpoint exporter probes:
+  - `9/3 @ 896`, bundled `mlp_vproj`: `3.42249372 -> 3.41939305`, compressed size `8,883,498 -> 8,535,535`
+  - `9/3 @ 1024`, bundled `mlp_vproj`: `3.44580757 -> 3.44812108`, compressed size `11,063,310 -> 10,581,948`
+  - `9/3 @ 1024` breakdown:
+    - `mlp`: `3.44877007`
+    - `vproj`: `3.44521752`
+    - `mlp_vproj`: `3.44812108`
+  - `9/3 @ 896` breakdown:
+    - `mlp`: `3.43721597`
+    - `vproj`: `3.43604091`
+    - `mlp_vproj`: `3.43586773`
+- Current conclusion: this family is more promising than fixed rotations, but the useful part is specifically attention `v ↔ proj` equalization. Exact MLP equalization is unstable across widths and should not be the default continuation.

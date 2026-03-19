@@ -392,6 +392,8 @@ INT8_CENTER_ROWS = bool(int(os.environ.get("INT8_CENTER_ROWS", "0")))
 INT8_ROTATION_KIND = os.environ.get("INT8_ROTATION_KIND", "none")
 INT8_ROTATION_BLOCK_SIZE = int(os.environ.get("INT8_ROTATION_BLOCK_SIZE", "128"))
 INT8_ROTATION_TARGET = os.environ.get("INT8_ROTATION_TARGET", "all_2d")
+INT8_SCALE_REPARAM_KIND = os.environ.get("INT8_SCALE_REPARAM_KIND", "none")
+INT8_SCALE_REPARAM_CLAMP = float(os.environ.get("INT8_SCALE_REPARAM_CLAMP", "4.0"))
 
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
@@ -469,6 +471,61 @@ def maybe_inverse_rotate_tensor(t: Tensor, qmeta: dict[str, object]) -> Tensor:
         raise ValueError(f"Unsupported rotation_kind={rotation_kind!r}")
     rotated = apply_blockwise_hadamard(t.float(), int(qmeta["rotation_block_size"]))
     return rotated.to(dtype=t.dtype).contiguous()
+
+def _clamp_channel_scale(scale: Tensor) -> Tensor:
+    if INT8_SCALE_REPARAM_CLAMP <= 1.0:
+        return scale
+    return scale.clamp(1.0 / INT8_SCALE_REPARAM_CLAMP, INT8_SCALE_REPARAM_CLAMP)
+
+def apply_scale_reparameterization(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, object]]:
+    if INT8_SCALE_REPARAM_KIND == "none":
+        return state_dict, {}
+    if INT8_SCALE_REPARAM_KIND not in {"mlp", "vproj", "mlp_vproj"}:
+        raise ValueError(f"Unsupported INT8_SCALE_REPARAM_KIND={INT8_SCALE_REPARAM_KIND!r}")
+
+    reparamed = {name: tensor.detach().clone() for name, tensor in state_dict.items()}
+    stats = {"mlp_pairs": 0, "vproj_pairs": 0}
+    eps = 1e-6
+
+    if INT8_SCALE_REPARAM_KIND in {"mlp", "mlp_vproj"}:
+        for name, tensor in list(reparamed.items()):
+            if not name.endswith(".mlp.fc.weight"):
+                continue
+            prefix = name[:-len("fc.weight")]
+            proj_name = prefix + "proj.weight"
+            if proj_name not in reparamed:
+                continue
+            fc = reparamed[name].float()
+            proj = reparamed[proj_name].float()
+            a = fc.abs().amax(dim=1).clamp_min(eps)
+            b = proj.abs().amax(dim=0).clamp_min(eps)
+            scale = _clamp_channel_scale(b.pow(0.25) / a.sqrt())
+            reparamed[name] = (fc * scale[:, None]).to(dtype=tensor.dtype).contiguous()
+            reparamed[proj_name] = (proj / scale.square()[None, :]).to(dtype=reparamed[proj_name].dtype).contiguous()
+            stats["mlp_pairs"] += 1
+
+    if INT8_SCALE_REPARAM_KIND in {"vproj", "mlp_vproj"}:
+        for name, tensor in list(reparamed.items()):
+            if not name.endswith(".attn.c_v.weight"):
+                continue
+            prefix = name[:-len("c_v.weight")]
+            proj_name = prefix + "proj.weight"
+            if proj_name not in reparamed:
+                continue
+            v = reparamed[name].float()
+            proj = reparamed[proj_name].float()
+            a = v.abs().amax(dim=1).clamp_min(eps)
+            if proj.shape[1] % v.shape[0] != 0:
+                continue
+            repeat_factor = proj.shape[1] // v.shape[0]
+            b = proj.abs().amax(dim=0).view(v.shape[0], repeat_factor).amax(dim=1).clamp_min(eps)
+            scale = _clamp_channel_scale(torch.sqrt(b / a))
+            expanded_scale = scale.repeat_interleave(repeat_factor)
+            reparamed[name] = (v * scale[:, None]).to(dtype=tensor.dtype).contiguous()
+            reparamed[proj_name] = (proj / expanded_scale[None, :]).to(dtype=reparamed[proj_name].dtype).contiguous()
+            stats["vproj_pairs"] += 1
+
+    return reparamed, stats
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor, dict[str, object], Tensor | None]:
     t32 = t.float()
@@ -557,12 +614,14 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
     passthrough_orig_dtypes: dict[str, str] = {}
     qmeta: dict[str, dict[str, object]] = {}
     offsets: dict[str, Tensor] = {}
+    transformed_state_dict, transform_stats = apply_scale_reparameterization(state_dict)
     stats = dict.fromkeys(
         ("param_count", "num_tensors", "num_float_tensors", "num_nonfloat_tensors", "baseline_tensor_bytes", "int8_payload_bytes"),
         0,
     )
+    stats.update(transform_stats)
 
-    for name, tensor in state_dict.items():
+    for name, tensor in transformed_state_dict.items():
         t = tensor.detach().to("cpu").contiguous()
         stats["param_count"] += int(t.numel())
         stats["num_tensors"] += 1
@@ -627,6 +686,13 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
         obj["offsets"] = offsets
     if passthrough_orig_dtypes:
         obj["passthrough_orig_dtypes"] = passthrough_orig_dtypes
+    if INT8_SCALE_REPARAM_KIND != "none":
+        obj["scale_reparam"] = {
+            "kind": INT8_SCALE_REPARAM_KIND,
+            "clamp": INT8_SCALE_REPARAM_CLAMP,
+            "mlp_pairs": stats["mlp_pairs"],
+            "vproj_pairs": stats["vproj_pairs"],
+        }
     return obj, stats
 
 def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
@@ -1286,6 +1352,10 @@ def main() -> None:
         f"int8_rotation_kind:{INT8_ROTATION_KIND} "
         f"int8_rotation_block_size:{INT8_ROTATION_BLOCK_SIZE} "
         f"int8_rotation_target:{INT8_ROTATION_TARGET}"
+    )
+    log0(
+        f"int8_scale_reparam_kind:{INT8_SCALE_REPARAM_KIND} "
+        f"int8_scale_reparam_clamp:{INT8_SCALE_REPARAM_CLAMP}"
     )
 
     # -----------------------------
