@@ -94,6 +94,7 @@ flowchart TD
 
 ## Prompt Craft
 
+- This is the live prompt-evolution section; after each research pass, update it with what prompt shape worked, what to ask next, and what to avoid repeating.
 - Start from the current best branch and the current bottleneck, then ask for ideas that beat that branch without repeating already-tested families.
 - Ask for mechanism-level novelty first; renamed versions of weak ideas should be treated as repeats unless they change the mechanism.
 - Keep the prompt short, goal-oriented, and explicit about what counts as a useful comparison.
