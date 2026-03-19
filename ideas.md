@@ -50,7 +50,10 @@ When a research pass is run:
 ## Current Snapshot
 
 - Best current local base: shared-core recurrence `9 logical / 3 shared / dim 896`
-- Best confirmed local improvement: about `5.8%` better than the local baseline-style branch on the post-quant proxy
+- Best current short-run local branch: shared-core `9 logical / 3 shared / dim 896` with `MLP_HIDDEN=2304`
+- Best confirmed local improvement:
+  - about `5.8%` better than an earlier local baseline-style proxy
+  - about `1.86%` better than a matched `9/9 @ 512` baseline under the current 10-step stride-64 post-quant setup
 - Main bottleneck: wider/shared models keep improving before export, then lose too much after int8 roundtrip
 - Strongest active clean branches:
   - sliding-window eval
@@ -194,7 +197,7 @@ flowchart TD
   - wider `MLP_HIDDEN=2304`: `3.54919676`, compressed size `6,123,000`
   - wider `MLP_HIDDEN=2688`: `3.56047610`, compressed size `6,608,336`
   The `2304` setting was clearly best of the tested values.
-- Next step: Treat `MLP_HIDDEN=2304` as the leading follow-on branch from the current shared-core base. If we continue tuning locally, refine around this region rather than jumping to much larger hidden sizes.
+- Next step: Treat `MLP_HIDDEN=2304` as the leading follow-on branch from the current shared-core base. Nearby checks at `2176` (`3.59427578`) and `2432` (`3.58679594`) were both worse, so there is no reason to keep sweeping this width range blindly.
 
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
@@ -451,8 +454,14 @@ flowchart TD
 - Current conclusion: narrow mixed precision on `mlp_proj` is a credible byte saver, but full-MLP `int6` is too destructive and the exporter trick alone is not the main win.
 - Tested the PR-guided "buy wider MLP capacity" idea directly on the shared-core `9/3 @ 896` base with `EVAL_STRIDE_TOKENS=64` and short 10-step local post-quant probes:
   - baseline `MLP_HIDDEN=1792`: `final_int8_zlib_roundtrip_exact val_bpb 3.56827291`, compressed size `5,533,450`
+  - nearby `MLP_HIDDEN=2176`: `3.59427578`, compressed size `6,097,683`
   - wider `MLP_HIDDEN=2304`: `3.54919676`, compressed size `6,123,000`
+  - nearby `MLP_HIDDEN=2432`: `3.58679594`, compressed size `6,400,596`
   - wider `MLP_HIDDEN=2688`: `3.56047610`, compressed size `6,608,336`
   - wider `MLP_HIDDEN=2304` plus `int6 mlp_proj`: `3.55609707`, compressed size `6,043,219`
   - wider `MLP_HIDDEN=2304` plus `vproj` equalization: `3.59200479`, compressed size `6,422,416`
 - Current conclusion: the real local win is moderate MLP widening itself, with `MLP_HIDDEN=2304` best of the tested settings. The mixed-precision and `vproj` stack-ons did not beat plain widened int8 on this branch.
+- Ran a matched baseline comparison under the same short post-quant setup:
+  - original-style baseline `9/9 @ 512`: `final_int8_zlib_roundtrip_exact val_bpb 3.61654604`, compressed size `6,905,103`
+  - current best short-run branch `9/3 @ 896`, `MLP_HIDDEN=2304`: `3.54919676`, compressed size `6,123,000`
+- Current conclusion: under the current apples-to-apples short local setup, the best measured branch is about `1.86%` better than the matched baseline.
