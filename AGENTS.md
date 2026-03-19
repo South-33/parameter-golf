@@ -1,0 +1,11 @@
+# Notes
+
+- Collaboration fallback -> if an agent hits an environment limitation, harness issue, missing access, or any blocker it cannot safely resolve, it should ask the user for help instead of guessing or stalling -> keeps loops moving when the local setup is the bottleneck.
+- Shared ideation backlog -> `ideas.md` is the living ranked idea backlog and experiment ledger; agents should update it when a new idea appears, when rankings change, and whenever a tried idea gets a result -> keeps the current strategy and evidence in one place.
+- Local Python setup -> the repo is on `C:`, but the working Python environment is at `D:\venvs\parameter-golf`; prefer that venv for installs and runs because `C:` space is tight -> prevents repeated CUDA install failures from disk pressure.
+- Windows local launch -> for single-GPU local loops prefer `python train_gpt.py` over `torchrun`; the Windows launcher path can trip over libuv/rendezvous issues that do not matter for the 1-GPU smoke workflow -> avoids wasting time on launcher-specific failures.
+- Git checkpoints -> make descriptive checkpoint commits after substantial progress and push when the result is worth preserving remotely -> keeps rollback points available during long experiment loops.
+- Local dev environment -> primary machine is Windows 11 with an RTX 4060 -> use it for CUDA smoke tests and iteration, not as a proxy for 8xH100 leaderboard performance.
+- Submission scoring -> final metric is post-quant `final_int8_zlib_roundtrip_exact val_bpb`, not the pre-quant validation loss -> optimizing a model that breaks after int8+zlib can look good mid-run but still fail the leaderboard metric.
+- Artifact accounting -> the 16,000,000-byte cap includes counted code plus compressed model bytes, and challenge submissions are expected to keep counted code in `train_gpt.py` while record PRs add a new folder under `records/` -> changing only root trainer code is not a valid final submission shape.
+- Evaluation/data -> validation is tokenizer-agnostic BPB on the fixed first-50k-doc `fineweb_val_*` split; tokenizer changes are allowed but scrutinized and must preserve correct byte accounting -> tokenizer bugs can create invalid wins.
