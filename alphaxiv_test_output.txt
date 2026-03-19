@@ -1,0 +1,3 @@
+Quantizable Transformers: Removing Outliers by Helping Attention Heads Do Nothing  
+2306.12929  
+It matters because it directly targets the activation outlier problem that makes transformers fragile under post-training quantization, improving quantization robustness at the architecture level.

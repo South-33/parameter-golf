@@ -47,85 +47,115 @@ When an experiment is run:
 - Latest result: Implemented and tested locally. It remains the best structural win. Wider settings improve raw quality, but post-quant degradation becomes the bottleneck by `dim 1024+`, so recurrence needs export/quantization help rather than more naive width.
 - Next step: Treat this as the base architecture and pair it with post-quant robustness work, especially centered export.
 
-### 2. Row-Centered Int8 Export
+### 2. Scale Reparameterization / Equivalent Transforms
+- Status: `Unvalidated`
+- Why: Reparameterize adjacent layers so difficult activation or weight scales are migrated into more quantization-friendly forms without changing the represented function.
+- Latest result: Promoted by multiple research passes as the strongest surviving new family after the fixed-rotation exporter probe underperformed. This is broader and more mathematically grounded than the row-centering and row-max penalty probes we already tried.
+- Next step: Build a small equivalent-transform branch such as per-channel scale migration on the biggest attention and MLP projections.
+
+### 3. Rotation / Incoherence Transforms
+- Status: `Weak`
+- Why: Apply a fixed or learned orthogonal change of basis around large 2D weights so outlier energy is spread across coordinates before int8 quantization instead of dominating a few rows.
+- Latest result: Implemented an export-only blockwise Hadamard path and tested it on same checkpoints. On `9/3 @ 896`, post-roundtrip `val_bpb` regressed from `3.45475773` to `3.45520042` while compressed size rose from `8,836,228` to `8,904,542` bytes. On `9/3 @ 1024`, it improved from `3.44899903` to `3.44652087`, but that is only about `0.072%` better, below the `0.1%` promotion threshold, with compressed size still rising from `11,066,108` to `11,142,110` bytes.
+- Next step: Do not escalate fixed rotations further right now. Revisit only if a later learned-rotation or basis-learning branch becomes compelling enough to justify a more invasive implementation.
+
+### 4. Sparse Outlier Sidecar
+- Status: `Unvalidated`
+- Why: Keep the dense int8 core compact and preserve only the most destructive outliers or sensitive coefficients in a tiny high-precision sidecar.
+- Latest result: Newly promoted from research review. It is plausible for the observed width-collapse pattern, but metadata overhead and artifact accounting make it riskier than rotations or scale reparameterization.
+- Next step: Defer until after the fixed-rotation exporter probe; only test if the same-checkpoint outlier concentration looks strong enough to justify side metadata.
+
+### 5. Optimizer-Aware Late Quant Fine-Tune
+- Status: `Unvalidated`
+- Why: Use a short late training phase with a more quantization-friendly optimizer and exact fake quant, rather than relying on naive Muon + fake-quant alone.
+- Latest result: Newly promoted from research review. It is more credible than naive QAT, but also more expensive and harder to validate locally than exporter-only ideas.
+- Next step: Only revisit after export-side ideas, especially if same-checkpoint fixes show that the remaining gap is training-dynamics rather than quantizer geometry.
+
+### 6. Asymmetric Recurrence Topology
+- Status: `Unvalidated`
+- Why: Keep three physical blocks but allocate them non-uniformly across logical depth so earlier, more heterogeneous layers specialize more than the later recurrent passes.
+- Latest result: Newly promoted from research review as the most credible architecture-side follow-on to the current shared-core branch.
+- Next step: Keep behind rotation and scale-reparameterization work; only test after the current export bottleneck is better understood.
+
+### 7. Row-Centered Int8 Export
 - Status: `Promising`
 - Why: Subtract the per-row mean before quantizing 2D weights, then add it back on dequantization so symmetric int8 bins are used on the centered residual instead of wasting dynamic range on row bias.
 - Latest result: Same-checkpoint exporter probes on the clean `9/3 @ 1024` control improved post-roundtrip `val_bpb` from `3.46420609` to `3.46273076` with compressed size increasing only from `11,045,085` to `11,081,284` bytes, and the effect repeated on another `1024` checkpoint. But on the stronger `9/3 @ 896` branch it regressed slightly from `3.43772923` to `3.43820288`.
 - Next step: Keep this integrated as an opt-in exporter path and use it selectively on wider shared models where per-row bias seems to be part of the quantization failure mode.
 
-### 3. Per-Row Weight Range Regularization
+### 8. Per-Row Weight Range Regularization
 - Status: `Testing`
 - Why: Penalize large per-row maxima during training so the final per-row int8 export has less dynamic range to destroy.
 - Latest result: `ROW_MAX_PENALTY=1e-4` on `9/3 @ 1024` improved local post-roundtrip `val_bpb` slightly from `3.46424692` to `3.45161882` on a separate short run, but a stronger `3e-4` penalty regressed to `3.48083960`. The branch has signal, but it is not robust enough yet to call a free win.
 - Next step: Leave it below centered export; only revisit with tighter same-checkpoint or longer-run comparisons.
 
-### 4. Quantization-Aware Training Matching Export Path
+### 9. Quantization-Aware Training Matching Export Path
 - Status: `Weak`
 - Why: Train the model to survive the repo's actual int8 + zlib roundtrip so the final scored model loses less quality after export.
 - Latest result: A first naive fake-quant pass on large linear weights with `QAT_START_STEP=10` did not produce a meaningful free win. `9/3 @ 896` improved only trivially from `3.62855` to `3.62825` post-quant bpb on the capped local proxy, while `9/3 @ 960` got worse and `9/3 @ 1024` improved only by noise-level margins.
 - Next step: Leave this aside as a free-win path; revisit only if we redesign QAT more carefully instead of just toggling naive late fake quant or pair it with a different optimizer.
 
-### 5. Grouped Int8 Export (Per-Group Scales)
+### 10. Grouped Int8 Export (Per-Group Scales)
 - Status: `Weak`
 - Why: Give each row multiple scale factors instead of one so wider matrices are quantized more precisely.
 - Latest result: Implemented with `INT8_GROUP_SIZE`. Same-checkpoint comparisons on `9/3 @ 1024` changed post-roundtrip `val_bpb` only from `3.44280567` to `3.44277812`, and on `9/3 @ 1536` it slightly worsened the result while increasing compressed bytes.
 - Next step: Keep the code path available, but deprioritize it behind centered export and other model-side ideas.
 
-### 6. Sliding-Window Validation With Overlapping Context
+### 11. Sliding-Window Validation With Overlapping Context
 - Status: `Weak`
 - Why: Use the allowed eval-time budget to score tokens with more context than the current non-overlapping windows.
 - Latest result: Implemented and smoke-tested locally; on tiny local checks it produced no measurable difference, and it never became a convincing free win.
 - Next step: Leave implemented but do not spend more time here until a stronger checkpoint suggests otherwise.
 
-### 7. Low-Rank Factorization Of Selected Large Matrices
+### 12. Low-Rank Factorization Of Selected Large Matrices
 - Status: `Unvalidated`
 - Why: Reduce parameter bytes in the largest projections, then reinvest the saved budget into width or depth.
 - Latest result: Not tested yet.
 - Next step: Factorize only selected attention projections first and measure artifact-size headroom before widening.
 
-### 8. SwiGLU Replacement For ReLU^2 MLP
+### 13. SwiGLU Replacement For ReLU^2 MLP
 - Status: `Weak`
 - Why: Better quality-per-parameter is plausible at this scale if the extra compute cost is acceptable.
 - Latest result: Added an opt-in `MLP_KIND=swiglu` path with a near-parameter-matched hidden size. On `9/3 @ 896` it was clearly worse than the current `relu2` branch: post-roundtrip `3.43765442 -> 3.50506778`.
 - Next step: Do not keep tuning this blindly on the current local proxy; only revisit if a later idea specifically suggests why SwiGLU should become more quant-stable under a different optimizer or training regime.
 
-### 9. Custom Low-Bit Export Format (INT4 / Mixed Precision Packing)
+### 14. Custom Low-Bit Export Format (INT4 / Mixed Precision Packing)
 - Status: `Unvalidated`
 - Why: Shrink stored weight bytes beyond the current int8 export and fit more effective capacity under the artifact cap.
 - Latest result: Not tested yet.
 - Next step: Prototype serialization only, measure compressed bytes, and defer model-quality work until the size win is real.
 
-### 10. Low-Rank Residual Adapters On Shared Blocks
+### 15. Low-Rank Residual Adapters On Shared Blocks
 - Status: `Weak`
 - Why: Add tiny per-logical-layer float adapter paths so shared blocks can correct recurrence/quantization drift without paying for full untied layers.
 - Latest result: A first `ADAPTER_RANK=8` test on `9/3 @ 1024` was decisively bad, jumping local post-roundtrip `val_bpb` to `3.86195309`.
 - Next step: Do not sweep adapter ranks blindly; only revisit if we redesign the adapter placement or optimizer treatment.
 
-### 11. Factorized Embeddings With Larger Tokenizer Vocabulary
+### 16. Factorized Embeddings With Larger Tokenizer Vocabulary
 - Status: `Unvalidated`
 - Why: Attack `val_bpb` through tokenizer efficiency while containing embedding cost with factorization.
 - Latest result: Not tested yet.
 - Next step: Estimate token-count reduction and embedding-byte cost before changing the tokenizer pipeline.
 
-### 12. Aggressive Compression-Aware Parameterization
+### 17. Aggressive Compression-Aware Parameterization
 - Status: `Unvalidated`
 - Why: Bias training toward lower-entropy, more quantization-friendly, more zlib-friendly weights instead of treating compression as a final afterthought.
 - Latest result: Not tested yet.
 - Next step: Revisit after QAT results; merge if the techniques overlap too much.
 
-### 13. Mostly-Shared Base Weights Plus Small Untied Control Paths
+### 18. Mostly-Shared Base Weights Plus Small Untied Control Paths
 - Status: `Unvalidated`
 - Why: Push capacity into large shared tensors and keep behavior flexible with cheap high-precision control tensors.
 - Latest result: Not tested yet.
 - Next step: Keep separate only if it diverges materially from the recurrence design.
 
-### 14. Local Cache / Copy / n-gram Auxiliary Head For Web Text
+### 19. Local Cache / Copy / n-gram Auxiliary Head For Web Text
 - Status: `Unvalidated`
 - Why: FineWeb likely has local repetitive structure that tiny dense models underuse.
 - Latest result: Not tested yet.
 - Next step: Only revisit after the main architecture path is measured.
 
-### 15. Magnitude Pruning For Better Zlib Compression
+### 20. Magnitude Pruning For Better Zlib Compression
 - Status: `Unvalidated`
 - Why: Force exact zeros and hope compression gains outweigh model-quality losses.
 - Latest result: Not tested yet.
@@ -196,3 +226,14 @@ When an experiment is run:
 - Added an opt-in SwiGLU MLP path via `MLP_KIND=swiglu` with near-matched hidden size.
   - `9/3 @ 896`: post-quant `3.43765442 -> 3.50506778`
 - Current conclusion: the first SwiGLU branch is clearly worse on the best current shared-core model and should not be tuned further as a free win.
+- Added a research refresh using AlphaXiv/web-backed parallel agent passes.
+  - Independent threads converged on rotations/incoherence transforms as the strongest new idea.
+  - Scale reparameterization / equivalent transforms emerged as the strongest second family.
+  - Sparse outlier sidecars, optimizer-aware late quant fine-tuning, and asymmetric recurrence topology were promoted as secondary candidates.
+- Current conclusion: the obvious next branch is an export-only rotation probe, not more blind tuning on the existing backlog.
+- Implemented an export-only blockwise Hadamard rotation path with `INT8_ROTATION_KIND`, `INT8_ROTATION_BLOCK_SIZE`, and `INT8_ROTATION_TARGET`.
+- Verified functionally that the Hadamard path inverts to numerical precision and safely skips non-divisible tensors.
+- Same-checkpoint exporter probes:
+  - `9/3 @ 896`: post-quant `3.45475773 -> 3.45520042`, compressed size `8,836,228 -> 8,904,542`
+  - `9/3 @ 1024`: post-quant `3.44899903 -> 3.44652087`, compressed size `11,066,108 -> 11,142,110`
+- Current conclusion: fixed blockwise Hadamard export is a real but too-small width-recovery effect. It misses the `0.1%` improvement bar, so the next serious branch should move to scale reparameterization / equivalent transforms instead of escalating fixed rotations.

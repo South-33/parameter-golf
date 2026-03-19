@@ -389,6 +389,9 @@ INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 INT8_GROUP_SIZE = int(os.environ.get("INT8_GROUP_SIZE", "0"))
 INT8_CENTER_ROWS = bool(int(os.environ.get("INT8_CENTER_ROWS", "0")))
+INT8_ROTATION_KIND = os.environ.get("INT8_ROTATION_KIND", "none")
+INT8_ROTATION_BLOCK_SIZE = int(os.environ.get("INT8_ROTATION_BLOCK_SIZE", "128"))
+INT8_ROTATION_TARGET = os.environ.get("INT8_ROTATION_TARGET", "all_2d")
 
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
@@ -400,6 +403,72 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
         passthrough_orig_dtypes[name] = str(t.dtype).removeprefix("torch.")
         return t.to(dtype=INT8_KEEP_FLOAT_STORE_DTYPE).contiguous()
     return t
+
+def _is_power_of_two(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+def _fwht_last_dim(x: Tensor) -> Tensor:
+    n = x.shape[-1]
+    if not _is_power_of_two(n):
+        raise ValueError(f"Hadamard block size must be a power of 2, got {n}")
+    y = x.contiguous()
+    h = 1
+    while h < n:
+        shape = y.shape
+        y = y.reshape(*shape[:-1], shape[-1] // (2 * h), 2, h)
+        a = y[..., 0, :]
+        b = y[..., 1, :]
+        y = torch.cat((a + b, a - b), dim=-1)
+        y = y.reshape(*shape)
+        h *= 2
+    return y.reshape_as(x)
+
+def apply_blockwise_hadamard(x: Tensor, block_size: int) -> Tensor:
+    if block_size <= 0 or x.shape[-1] % block_size != 0:
+        raise ValueError(f"Invalid Hadamard block_size={block_size} for shape {tuple(x.shape)}")
+    blocks = x.reshape(*x.shape[:-1], -1, block_size)
+    rotated = _fwht_last_dim(blocks) / math.sqrt(block_size)
+    return rotated.reshape_as(x).contiguous()
+
+def should_rotate_tensor(name: str, t: Tensor) -> bool:
+    if INT8_ROTATION_KIND == "none":
+        return False
+    if INT8_ROTATION_KIND != "hadamard":
+        raise ValueError(f"Unsupported INT8_ROTATION_KIND={INT8_ROTATION_KIND!r}")
+    if INT8_ROTATION_TARGET not in {"all_2d", "attn_only", "mlp_only"}:
+        raise ValueError(f"Unsupported INT8_ROTATION_TARGET={INT8_ROTATION_TARGET!r}")
+    if t.ndim != 2 or t.shape[-1] <= 0:
+        return False
+    if INT8_ROTATION_BLOCK_SIZE <= 0 or not _is_power_of_two(INT8_ROTATION_BLOCK_SIZE):
+        raise ValueError(f"INT8_ROTATION_BLOCK_SIZE must be a positive power of 2, got {INT8_ROTATION_BLOCK_SIZE}")
+    if t.shape[-1] % INT8_ROTATION_BLOCK_SIZE != 0:
+        return False
+    if INT8_ROTATION_TARGET == "attn_only":
+        return ".attn." in name
+    if INT8_ROTATION_TARGET == "mlp_only":
+        return ".mlp." in name
+    return True
+
+def maybe_rotate_tensor_for_export(name: str, t: Tensor) -> tuple[Tensor, dict[str, object]]:
+    if not should_rotate_tensor(name, t):
+        return t, {}
+    return (
+        apply_blockwise_hadamard(t.float(), INT8_ROTATION_BLOCK_SIZE).to(dtype=t.dtype),
+        {
+            "rotation_kind": "hadamard",
+            "rotation_block_size": INT8_ROTATION_BLOCK_SIZE,
+            "rotation_axis": -1,
+        },
+    )
+
+def maybe_inverse_rotate_tensor(t: Tensor, qmeta: dict[str, object]) -> Tensor:
+    rotation_kind = qmeta.get("rotation_kind")
+    if rotation_kind is None:
+        return t
+    if rotation_kind != "hadamard":
+        raise ValueError(f"Unsupported rotation_kind={rotation_kind!r}")
+    rotated = apply_blockwise_hadamard(t.float(), int(qmeta["rotation_block_size"]))
+    return rotated.to(dtype=t.dtype).contiguous()
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor, dict[str, object], Tensor | None]:
     t32 = t.float()
@@ -514,7 +583,10 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             continue
 
         stats["num_float_tensors"] += 1
-        q, s, meta, row_offset = quantize_float_tensor(t)
+        export_t, rotation_meta = maybe_rotate_tensor_for_export(name, t)
+        q, s, meta, row_offset = quantize_float_tensor(export_t)
+        if rotation_meta:
+            meta = {**meta, **rotation_meta}
         if meta:
             qmeta[name] = meta
         quantized[name] = q
@@ -528,7 +600,15 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
 
     obj: dict[str, object] = {
         "__quant_format__": (
-            "int8_clean_centered_group_v1"
+            "int8_clean_rotated_centered_group_v1"
+            if INT8_ROTATION_KIND != "none" and INT8_CENTER_ROWS and INT8_GROUP_SIZE > 0
+            else "int8_clean_rotated_centered_per_row_v1"
+            if INT8_ROTATION_KIND != "none" and INT8_CENTER_ROWS
+            else "int8_clean_rotated_per_row_group_v1"
+            if INT8_ROTATION_KIND != "none" and INT8_GROUP_SIZE > 0
+            else "int8_clean_rotated_per_row_v1"
+            if INT8_ROTATION_KIND != "none"
+            else "int8_clean_centered_group_v1"
             if INT8_CENTER_ROWS and INT8_GROUP_SIZE > 0
             else "int8_clean_centered_per_row_v1"
             if INT8_CENTER_ROWS
@@ -557,7 +637,10 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
     for name, q in obj["quantized"].items():
         dtype = getattr(torch, obj["dtypes"][name])
         s = obj["scales"][name]
-        out[name] = dequantize_quantized_tensor(q, s, qmeta.get(name, {}), dtype, offsets.get(name))
+        out[name] = maybe_inverse_rotate_tensor(
+            dequantize_quantized_tensor(q, s, qmeta.get(name, {}), dtype, offsets.get(name)),
+            qmeta.get(name, {}),
+        )
     for name, t in obj["passthrough"].items():
         # Restore small tensors, undoing the temporary fp16 storage cast if needed.
         out_t = t.detach().to("cpu").contiguous()
@@ -1199,6 +1282,11 @@ def main() -> None:
     log0(f"seed:{args.seed}")
     log0(f"int8_group_size:{INT8_GROUP_SIZE}")
     log0(f"int8_center_rows:{int(INT8_CENTER_ROWS)}")
+    log0(
+        f"int8_rotation_kind:{INT8_ROTATION_KIND} "
+        f"int8_rotation_block_size:{INT8_ROTATION_BLOCK_SIZE} "
+        f"int8_rotation_target:{INT8_ROTATION_TARGET}"
+    )
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
