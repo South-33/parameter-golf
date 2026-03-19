@@ -54,11 +54,11 @@ When a research pass is run:
 - Main bottleneck: wider/shared models keep improving before export, then lose too much after int8 roundtrip
 - Strongest active clean branches:
   - sliding-window eval
-  - long-context training + matching long-context eval
   - `v ↔ proj` equalization
   - tied-embedding precision handling
 - Strategically strong but deferred here:
   - tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be more favorable than we first assumed
+  - longer-context training (`2048+`) because public PR evidence is strong but the short 4060 proxy looked locally unattractive
 
 ## Current Research Thesis
 
@@ -206,14 +206,14 @@ flowchart TD
 ### 6. Long-Context Training + Matching Long-Context Eval
 - Status: `Unvalidated`
 - Why: Real challenge runs now suggest that training and evaluating at `2048-4096` context is a clean gain source in its own right, not just a garnish on sliding-window eval.
-- Latest result: Newly promoted from the PR `#36-#70` audit. PR #65 reported `1.1808 val_bpb` with `TRAIN_SEQ_LEN=4096`, tuned Muon, and matching long-context sliding eval; PR #63 independently reached `1.2067` with `SEQ_LEN=2048` plus fp16 tied embeddings. The clean common thread is that longer context itself appears to survive the real `10 minute / 8xH100` budget.
-- Next step: Treat this as a first-class clean branch. Before implementing anything heavy locally, compare the repo's throughput assumptions and determine whether a smaller local proxy can still test the direction without turning into a misleading speed-only experiment.
+- Latest result: Strong external evidence remains: PR #65 reported `1.1808 val_bpb` with `TRAIN_SEQ_LEN=4096`, tuned Muon, and matching long-context sliding eval; PR #63 independently reached `1.2067` with `SEQ_LEN=2048` plus fp16 tied embeddings. But a corrected local feasibility probe on the current `9/3 @ 896` base showed the limitation of the 4060 proxy: `TRAIN_SEQ_LEN=2048` is technically feasible with `TRAIN_BATCH_TOKENS=16384`, but a short 10-step matched-token run was slower and clearly worse than the `1024` reference (`val_bpb 4.7467` at about `3.21s/step` vs `3.7266` at about `2.59s/step`).
+- Next step: Keep this branch strategically alive because of the real-run PR evidence, but do not spend many more 4060 cycles trying to prove it locally. Revisit on better hardware or as part of a more official-style run, not as a short local tuning loop.
 
 ### 7. Tied Embedding / Output Head Precision Handling
 - Status: `Testing`
 - Why: The tied embedding doubles as the output head, so protecting it from low precision may remove a disproportionate amount of damage during both optimization and export.
-- Latest result: Strong external evidence from PR #42 says fp16 export here can nearly eliminate the baseline quant gap, and PR #10 adds a useful training-side nuance: the tied embedding should likely remain an fp32-master parameter during optimization, not only get special treatment at export. A first same-checkpoint local exporter probe on the saved `9/3 @ 896` checkpoint also moved in the right direction: keeping `tok_emb.weight` in fp16 reduced a tiny 4-sequence proxy loss from `5.35634136` to `5.35576963`, but increased compressed bytes from `8,020,963` to `8,619,404` (`+7.46%`).
-- Next step: Keep this as a serious precision-allocation branch, but judge it on fuller same-checkpoint evals and byte tradeoffs rather than tiny proxy loss alone. If continued, test it as a combined training-side + export-side precision branch with mild capacity rebalancing rather than as a pure byte increase.
+- Latest result: Strong external evidence from PR #42 says fp16 export here can nearly eliminate the baseline quant gap, and PR #10 adds a useful training-side nuance: the tied embedding should likely remain an fp32-master parameter during optimization, not only get special treatment at export. But on the short local 4060 proxy, the training-side refinement did not turn into a free win: a same-code 10-step `9/3 @ 896` control at `TRAIN_SEQ_LEN=1024` reached `val_bpb 3.5984`, while `TIED_EMB_FP32_MASTER=1` landed at `3.6019` with a slightly larger int8+zlib artifact (`5,645,476 -> 5,661,947` bytes). The earlier exporter-only fp16 probe still moved a tiny 4-sequence proxy loss in the right direction (`5.35634136 -> 5.35576963`) but at a real byte cost (`+7.46%`).
+- Next step: Keep this branch alive because the external evidence is strong, but do not assume the training-side fp32-master variant is a free local gain. If continued, judge it on fuller post-quant evals or as a combined training+export precision branch with explicit byte rebalancing.
 
 ### 8. Sparse Outlier Sidecar
 - Status: `Unvalidated`
@@ -420,3 +420,13 @@ flowchart TD
   - standard int8 export: compressed bytes `8,020,963`, 4-sequence proxy loss `5.35634136`
   - keep `tok_emb.weight` in fp16: compressed bytes `8,619,404`, 4-sequence proxy loss `5.35576963`
 - Current conclusion: fp16 tied embedding likely helps, but the local gain is small on this checkpoint and the byte tax is non-trivial (`+7.46%`). This stays alive as a precision-allocation branch, but it should be judged on fuller evals and possibly paired with capacity rebalancing.
+- Ran corrected long-context local probes on the current `9/3 @ 896` base using enough tokens per micro-step for `grad_accum_steps=8`:
+  - `TRAIN_SEQ_LEN=2048`, `TRAIN_BATCH_TOKENS=16384`, `VAL_BATCH_SIZE=16384`, `ITERATIONS=1`: feasibility check passed at about `2.03s` train time, `2540 MiB` peak allocated, showing the branch is runnable locally
+  - matched 10-step token-budget probe:
+    - `TRAIN_SEQ_LEN=2048`: `val_bpb 4.7467`, step average `~3213ms`, peak allocated `2608 MiB`
+    - `TRAIN_SEQ_LEN=1024`: `val_bpb 3.7266`, step average `~2587ms`, peak allocated `1841 MiB`
+- Current conclusion: longer context is strategically real from public PR evidence, but the short 4060 proxy currently makes it look both slower and worse; this is not a good local branch to keep grinding on without better hardware or a more official-style run.
+- Added an opt-in training-side tied-embedding refinement via `TIED_EMB_FP32_MASTER` and compared it on a same-code 10-step local control:
+  - control `TRAIN_SEQ_LEN=1024`, `TRAIN_BATCH_TOKENS=16384`: `val_bpb 3.5984`, int8+zlib bytes `5,645,476`
+  - `TIED_EMB_FP32_MASTER=1`: `val_bpb 3.6019`, int8+zlib bytes `5,661,947`
+- Current conclusion: keeping the tied embedding fp32-master during training is plausible from external evidence, but it is not a free local win on the short 4060 proxy. Keep the idea alive, but do not prioritize it over branches with clearer same-checkpoint signal.

@@ -77,6 +77,7 @@ class Hyperparameters:
     mlp_hidden = int(os.environ.get("MLP_HIDDEN", "0"))
     adapter_rank = int(os.environ.get("ADAPTER_RANK", 0))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
+    tied_emb_fp32_master = bool(int(os.environ.get("TIED_EMB_FP32_MASTER", "0")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
 
@@ -821,6 +822,12 @@ def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
                 param.data = param.data.float()
 
 
+def restore_tied_embedding_to_fp32(module: nn.Module) -> None:
+    with torch.no_grad():
+        if hasattr(module, "tok_emb") and module.tok_emb.weight.dtype != torch.float32:
+            module.tok_emb.weight.data = module.tok_emb.weight.data.float()
+
+
 def set_qat_enabled(module: nn.Module, enabled: bool) -> None:
     for submodule in module.modules():
         if isinstance(submodule, CastedLinear):
@@ -999,6 +1006,7 @@ class GPT(nn.Module):
         mlp_hidden: int,
         adapter_rank: int,
         tie_embeddings: bool,
+        tied_emb_fp32_master: bool,
         tied_embed_init_std: float,
         logit_softcap: float,
         rope_base: float,
@@ -1013,6 +1021,7 @@ class GPT(nn.Module):
                 f"num_layers={num_layers}"
             )
         self.tie_embeddings = tie_embeddings
+        self.tied_emb_fp32_master = tied_emb_fp32_master and tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
         self.num_layers = num_layers
@@ -1087,7 +1096,10 @@ class GPT(nn.Module):
                 nn.init.zeros_(module.weight)
 
     def _forward_hidden(self, input_ids: Tensor) -> Tensor:
-        x = self.tok_emb(input_ids)
+        if self.tied_emb_fp32_master:
+            x = F.embedding(input_ids, self.tok_emb.weight.to(dtype=torch.bfloat16))
+        else:
+            x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
@@ -1105,7 +1117,8 @@ class GPT(nn.Module):
     def _project_logits(self, x: Tensor) -> Tensor:
         x = self.final_norm(x)
         if self.tie_embeddings:
-            logits_proj = F.linear(x, self.tok_emb.weight)
+            weight = self.tok_emb.weight.to(dtype=x.dtype) if self.tied_emb_fp32_master else self.tok_emb.weight
+            logits_proj = F.linear(x, weight)
         else:
             if self.lm_head is None:
                 raise RuntimeError("lm_head is required when tie_embeddings=False")
@@ -1253,6 +1266,7 @@ def main() -> None:
         mlp_kind=args.mlp_kind,
         mlp_hidden=args.mlp_hidden,
         tie_embeddings=args.tie_embeddings,
+        tied_emb_fp32_master=args.tied_emb_fp32_master,
         tied_embed_init_std=args.tied_embed_init_std,
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
@@ -1263,6 +1277,8 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
+    if args.tied_emb_fp32_master and args.tie_embeddings:
+        restore_tied_embedding_to_fp32(base_model)
     compiled_model = (
         torch.compile(base_model, dynamic=False, fullgraph=True)
         if not args.disable_compile
@@ -1341,6 +1357,7 @@ def main() -> None:
         f"head_lr:{args.head_lr if base_model.lm_head is not None else 0.0} "
         f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr}"
     )
+    log0(f"tied_emb_fp32_master:{int(args.tied_emb_fp32_master and args.tie_embeddings)}")
     log0(
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "

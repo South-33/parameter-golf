@@ -20,6 +20,7 @@
 - Tokenizer re-export cost -> the hosted `datasets/docs_selected.jsonl` needed for local tokenizer/data re-export is about `48.17 GB`; prefer `D:` for any tokenizer re-export workspace and treat this as a substantial download/storage decision, not a quick prep step -> avoids accidentally blowing local time or disk on the wrong drive.
 - Exporter direction -> row-centered int8 export is width-sensitive: it consistently helped the local `9/3 @ 1024` branch for ~36 KB extra compressed size, but slightly hurt the current best `9/3 @ 896` branch, while grouped per-row scales were mostly noise -> treat centered export as a recovery tool for wider models, not a blanket default.
 - Tied embedding precision -> the tied input embedding / output head looks important enough to protect during both training and export; PR #10 adds the useful nuance that it should stay fp32-master during optimization, not only get special treatment at export -> treat tied-embedding precision as a full branch, not just a serializer tweak.
+- Tied embedding local evidence -> exporter-side protection still has some signal, but the short 4060 proxy did not show a free win from `TIED_EMB_FP32_MASTER=1` during training -> do not overfit to the PR nuance without a better-quality eval.
 - Research direction -> recent research passes pointed toward rotation/incoherence and scale-reparameterization as promising families, but the fixed Hadamard exporter probe underperformed; the first exact scale-reparameterization pass suggests that `v <-> proj` equalization has the cleanest signal so far while `relu^2` MLP equalization looks less stable -> treat this as current evidence, not a locked roadmap.
 
 ## Main Goals
@@ -35,5 +36,5 @@
 - Best current local base -> shared-core recurrence `9 logical / 3 shared / dim 896`.
 - Best confirmed local improvement -> about `5.8%` better than the local baseline-style branch on the post-quant proxy.
 - Main bottleneck -> wider models improve pre-quant quality, then lose too much after int8 export.
-- Strongest active clean branches -> sliding-window eval, long-context training + matching long-context eval, `v <-> proj` equalization, and tied-embedding precision handling.
-- Strategically strong but currently deferred -> tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be friendlier than we first assumed.
+- Strongest active clean branches -> sliding-window eval, `v <-> proj` equalization, and tied-embedding precision handling.
+- Strategically strong but currently deferred -> tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be friendlier than we first assumed; longer-context training is also strategically real but the short 4060 proxy looked locally unattractive.
