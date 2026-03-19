@@ -392,6 +392,8 @@ INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 INT8_GROUP_SIZE = int(os.environ.get("INT8_GROUP_SIZE", "0"))
 INT8_CENTER_ROWS = bool(int(os.environ.get("INT8_CENTER_ROWS", "0")))
 INT8_KEEP_TOK_EMB_FP16 = bool(int(os.environ.get("INT8_KEEP_TOK_EMB_FP16", "0")))
+INT8_LOWBIT_BITS = int(os.environ.get("INT8_LOWBIT_BITS", "8"))
+INT8_LOWBIT_TARGET = os.environ.get("INT8_LOWBIT_TARGET", "none")
 INT8_ROTATION_KIND = os.environ.get("INT8_ROTATION_KIND", "none")
 INT8_ROTATION_BLOCK_SIZE = int(os.environ.get("INT8_ROTATION_BLOCK_SIZE", "128"))
 INT8_ROTATION_TARGET = os.environ.get("INT8_ROTATION_TARGET", "all_2d")
@@ -408,6 +410,59 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
         passthrough_orig_dtypes[name] = str(t.dtype).removeprefix("torch.")
         return t.to(dtype=INT8_KEEP_FLOAT_STORE_DTYPE).contiguous()
     return t
+
+
+def _pack_lowbit_codes(codes: Tensor, num_bits: int) -> Tensor:
+    flat = codes.reshape(-1).to(dtype=torch.int64)
+    total_bits = flat.numel() * num_bits
+    out = torch.zeros((total_bits + 7) // 8, dtype=torch.uint8)
+    bit_pos = 0
+    for value in flat.tolist():
+        byte_idx = bit_pos // 8
+        offset = bit_pos % 8
+        out[byte_idx] |= torch.tensor((value << offset) & 0xFF, dtype=torch.uint8)
+        spill = offset + num_bits - 8
+        if spill > 0:
+            out[byte_idx + 1] |= torch.tensor((value >> (8 - offset)) & ((1 << spill) - 1), dtype=torch.uint8)
+        bit_pos += num_bits
+    return out.contiguous()
+
+
+def _unpack_lowbit_codes(packed: Tensor, num_bits: int, count: int) -> Tensor:
+    src = packed.reshape(-1).to(dtype=torch.int64).tolist()
+    mask = (1 << num_bits) - 1
+    values = []
+    bit_pos = 0
+    for _ in range(count):
+        byte_idx = bit_pos // 8
+        offset = bit_pos % 8
+        value = (src[byte_idx] >> offset) & mask
+        spill = offset + num_bits - 8
+        if spill > 0:
+            value |= (src[byte_idx + 1] & ((1 << spill) - 1)) << (8 - offset)
+        values.append(value)
+        bit_pos += num_bits
+    return torch.tensor(values, dtype=torch.uint8)
+
+
+def select_quant_bits(name: str, t: Tensor) -> int:
+    if t.ndim != 2 or INT8_LOWBIT_BITS >= 8:
+        return 8
+    if INT8_LOWBIT_BITS <= 0 or INT8_LOWBIT_BITS >= 8:
+        raise ValueError(f"INT8_LOWBIT_BITS must be in [1, 7] when enabled, got {INT8_LOWBIT_BITS}")
+    if INT8_LOWBIT_TARGET not in {"none", "all_2d", "attn", "mlp", "mlp_proj"}:
+        raise ValueError(f"Unsupported INT8_LOWBIT_TARGET={INT8_LOWBIT_TARGET!r}")
+    if INT8_LOWBIT_TARGET == "none":
+        return 8
+    if INT8_LOWBIT_TARGET == "all_2d":
+        return INT8_LOWBIT_BITS
+    if INT8_LOWBIT_TARGET == "attn":
+        return INT8_LOWBIT_BITS if ".attn." in name else 8
+    if INT8_LOWBIT_TARGET == "mlp":
+        return INT8_LOWBIT_BITS if ".mlp." in name else 8
+    if INT8_LOWBIT_TARGET == "mlp_proj":
+        return INT8_LOWBIT_BITS if name.endswith(".mlp.proj.weight") else 8
+    return 8
 
 def _is_power_of_two(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
@@ -530,8 +585,11 @@ def apply_scale_reparameterization(state_dict: dict[str, Tensor]) -> tuple[dict[
 
     return reparamed, stats
 
-def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor, dict[str, object], Tensor | None]:
+def quantize_float_tensor(t: Tensor, num_bits: int = 8) -> tuple[Tensor, Tensor, dict[str, object], Tensor | None]:
     t32 = t.float()
+    qmax = 127 if num_bits == 8 else (1 << (num_bits - 1)) - 1
+    if qmax <= 0:
+        raise ValueError(f"Invalid quantization bits={num_bits}")
     if t32.ndim == 2:
         row_offset = None
         if INT8_CENTER_ROWS:
@@ -546,12 +604,18 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor, dict[str, object],
                 else torch.empty((t32.shape[0], 0), dtype=torch.float32)
             )
             clipped = torch.maximum(torch.minimum(grouped, clip_abs[..., None]), -clip_abs[..., None])
-            scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-            q = torch.clamp(torch.round(clipped / scale[..., None]), -127, 127).to(torch.int8).contiguous()
+            scale = (clip_abs / float(qmax)).clamp_min(1.0 / float(qmax))
+            q = torch.clamp(torch.round(clipped / scale[..., None]), -qmax, qmax).to(torch.int16).contiguous()
+            meta: dict[str, object] = {"scheme": "per_row_group", "axis": 0, "group_size": group_size}
+            if num_bits < 8:
+                q_out = _pack_lowbit_codes((q + qmax).to(torch.uint8), num_bits)
+                meta.update({"num_bits": num_bits, "orig_shape": list(t32.shape)})
+            else:
+                q_out = q.to(torch.int8).contiguous()
             return (
-                q.view_as(t32),
+                q_out,
                 scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous(),
-                {"scheme": "per_row_group", "axis": 0, "group_size": group_size},
+                meta,
                 row_offset.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous() if row_offset is not None else None,
             )
 
@@ -563,25 +627,43 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor, dict[str, object],
             else torch.empty((t32.shape[0],), dtype=torch.float32)
         )
         clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
+        scale = (clip_abs / float(qmax)).clamp_min(1.0 / float(qmax))
+        q = torch.clamp(torch.round(clipped / scale[:, None]), -qmax, qmax).to(torch.int16).contiguous()
+        meta = {"scheme": "per_row", "axis": 0}
+        if num_bits < 8:
+            q_out = _pack_lowbit_codes((q + qmax).to(torch.uint8), num_bits)
+            meta.update({"num_bits": num_bits, "orig_shape": list(t32.shape)})
+        else:
+            q_out = q.to(torch.int8).contiguous()
         return (
-            q,
+            q_out,
             scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous(),
-            {"scheme": "per_row", "axis": 0},
+            meta,
             row_offset.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous() if row_offset is not None else None,
         )
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
-    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
-    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
-    return q, scale, {}, None
+    scale = torch.tensor(clip_abs / float(qmax) if clip_abs > 0 else 1.0, dtype=torch.float32)
+    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -qmax, qmax).to(torch.int16).contiguous()
+    if num_bits < 8:
+        return (
+            _pack_lowbit_codes((q + qmax).to(torch.uint8), num_bits),
+            scale,
+            {"num_bits": num_bits, "orig_shape": list(t32.shape)},
+            None,
+        )
+    return q.to(torch.int8).contiguous(), scale, {}, None
 
 
 def dequantize_quantized_tensor(
     q: Tensor, s: Tensor, qmeta: dict[str, object], dtype: torch.dtype, row_offset: Tensor | None = None
 ) -> Tensor:
+    num_bits = int(qmeta.get("num_bits", 8))
+    qmax = 127 if num_bits == 8 else (1 << (num_bits - 1)) - 1
+    if num_bits < 8:
+        orig_shape = tuple(int(v) for v in qmeta["orig_shape"])
+        q = (_unpack_lowbit_codes(q, num_bits, math.prod(orig_shape)).to(torch.int16) - qmax).view(*orig_shape)
     scheme = qmeta.get("scheme")
     if scheme == "per_row_group":
         group_size = int(qmeta["group_size"])
@@ -646,7 +728,7 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
 
         stats["num_float_tensors"] += 1
         export_t, rotation_meta = maybe_rotate_tensor_for_export(name, t)
-        q, s, meta, row_offset = quantize_float_tensor(export_t)
+        q, s, meta, row_offset = quantize_float_tensor(export_t, num_bits=select_quant_bits(name, export_t))
         if rotation_meta:
             meta = {**meta, **rotation_meta}
         if meta:
@@ -698,6 +780,8 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
         }
     if INT8_KEEP_TOK_EMB_FP16:
         obj["keep_tok_emb_fp16"] = True
+    if INT8_LOWBIT_BITS < 8 and INT8_LOWBIT_TARGET != "none":
+        obj["lowbit"] = {"bits": INT8_LOWBIT_BITS, "target": INT8_LOWBIT_TARGET}
     return obj, stats
 
 def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
@@ -1370,6 +1454,7 @@ def main() -> None:
     log0(f"int8_group_size:{INT8_GROUP_SIZE}")
     log0(f"int8_center_rows:{int(INT8_CENTER_ROWS)}")
     log0(f"int8_keep_tok_emb_fp16:{int(INT8_KEEP_TOK_EMB_FP16)}")
+    log0(f"int8_lowbit_bits:{INT8_LOWBIT_BITS} int8_lowbit_target:{INT8_LOWBIT_TARGET}")
     log0(
         f"int8_rotation_kind:{INT8_ROTATION_KIND} "
         f"int8_rotation_block_size:{INT8_ROTATION_BLOCK_SIZE} "

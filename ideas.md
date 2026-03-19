@@ -54,6 +54,7 @@ When a research pass is run:
 - Main bottleneck: wider/shared models keep improving before export, then lose too much after int8 roundtrip
 - Strongest active clean branches:
   - sliding-window eval
+  - moderate MLP widening on the shared-core base
   - `v ↔ proj` equalization
   - tied-embedding precision handling
 - Strategically strong but deferred here:
@@ -66,7 +67,7 @@ When a research pass is run:
 - Main observed bottleneck: post-quant collapse, especially when width moves beyond the current local sweet spot.
 - Current strongest surviving sub-signal: attention `v ↔ proj` equalization; exact MLP equalization has looked less stable across widths.
 - Strong external signal from real 8xH100 PRs: sliding-window eval and tokenizer efficiency matter more than the local 4060 proxy suggested, so local null results there should not be over-weighted.
-- New external signal from the broader PR sweep: longer train/eval context and byte-funded wider MLPs look cleaner than many exporter-only tricks, so the backlog should not over-focus on pure quantizer geometry.
+- New external signal from the broader PR sweep: longer train/eval context and byte-funded wider MLPs look cleaner than many exporter-only tricks, and the first direct local probe says the wider-MLP part is the real win here.
 - Current research bias, subject to revision:
   1. quantization-stable architecture or parameterization changes that preserve the recurrence gain
   2. tokenizer, context-length, or evaluation changes that already show clean gains on real challenge runs
@@ -185,6 +186,16 @@ flowchart TD
 - Latest result: Implemented an exact exporter-only branch that rebalances `relu^2` MLP `fc ↔ proj` pairs and attention `v ↔ proj` pairs before quantization. The bundled `mlp_vproj` transform helped `9/3 @ 896` on a same-checkpoint comparison (`3.42249372 -> 3.41939305`) while shrinking the compressed file (`8,883,498 -> 8,535,535`), but it hurt `9/3 @ 1024` (`3.44580757 -> 3.44812108`). Breaking the branch apart showed the stable effect is in `vproj`: on `1024`, `vproj` alone improved `3.44580757 -> 3.44521752`, while `mlp` alone regressed; on `896`, `vproj` alone improved `3.43716252 -> 3.43604091`.
 - Next step: If this branch is continued, prioritize narrower `vproj`-focused follow-ups or learned/activation-aware scale migration over bundled MLP equalization.
 
+### 2a. Moderate MLP Widening On The Shared-Core Base
+- Status: `Promising`
+- Why: The current shared-core base appears under-invested in MLP capacity, and the artifact cap is not the immediate limiter on the local best branch, so a wider hidden dimension may be a cleaner way to buy quality than more exporter complexity.
+- Latest result: This is the strongest new local branch after the PR-guided mixed-precision exploration. On the `9/3 @ 896` base with `EVAL_STRIDE_TOKENS=64` and a short 10-step proxy:
+  - baseline `MLP_HIDDEN=1792`: `final_int8_zlib_roundtrip_exact val_bpb 3.56827291`, compressed size `5,533,450`
+  - wider `MLP_HIDDEN=2304`: `3.54919676`, compressed size `6,123,000`
+  - wider `MLP_HIDDEN=2688`: `3.56047610`, compressed size `6,608,336`
+  The `2304` setting was clearly best of the tested values.
+- Next step: Treat `MLP_HIDDEN=2304` as the leading follow-on branch from the current shared-core base. If we continue tuning locally, refine around this region rather than jumping to much larger hidden sizes.
+
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
 - Why: Apply a fixed or learned orthogonal change of basis around large 2D weights so outlier energy is spread across coordinates before int8 quantization instead of dominating a few rows.
@@ -260,8 +271,11 @@ flowchart TD
 ### 15. Mixed-Precision Layerwise Export (e.g. int8/int6)
 - Status: `Unvalidated`
 - Why: Different layers may deserve different export precision, and the most useful version of this idea may be to spend the saved bytes on better model capacity rather than just shrinking artifacts.
-- Latest result: Strong external evidence from PR #39: a `10-layer` model with `int8` outer layers and `int6` middle layers reached about `1.2139` mean `val_bpb` across 5 seeds under the real budget. The newer PR #65 strengthened the idea by combining mixed precision with a wider `MLP_MULT=3` branch and stride-64 eval, reaching `1.1630`; the clean sub-idea is that precision allocation can fund more useful width.
-- Next step: Keep this as a credible branch, but frame it as a capacity-reallocation idea rather than a tiny exporter tweak. If we test it locally, compare "mixed precision only" against "mixed precision used to buy wider MLP capacity."
+- Latest result: Strong external evidence from PR #39: a `10-layer` model with `int8` outer layers and `int6` middle layers reached about `1.2139` mean `val_bpb` across 5 seeds under the real budget. The newer PR #65 strengthened the idea by combining mixed precision with a wider `MLP_MULT=3` branch and stride-64 eval, reaching `1.1630`; the clean sub-idea is that precision allocation can fund more useful width. Locally, the same-checkpoint exporter probe was encouraging but narrower than the PR framing:
+  - saved current-best checkpoint, `int6` on `mlp_proj` only: compressed bytes `8,878,592 -> 7,685,366` (`-13.4%`) with only a tiny regression `3.43550794 -> 3.43626937`
+  - `int6` on all MLP weights: compressed bytes `8,878,592 -> 6,621,505` but regressed much more strongly to `3.45281219`
+  - on the retrained wider-MLP branch, `MLP_HIDDEN=2304` plus `int6 mlp_proj` reached `3.55609707`, which was still worse than plain widened int8 (`3.54919676`) while saving only about `1.3%` compressed bytes (`6,123,000 -> 6,043,219`)
+- Next step: Keep this as a credible fallback branch, but the current local evidence says the wider MLP is the real win and mixed precision is only a secondary byte-trimming tool here. Do not prioritize it over plain MLP widening unless we get closer to the artifact cap.
 
 ### 16. Low-Rank Factorization Of Selected Large Matrices
 - Status: `Unvalidated`
@@ -430,3 +444,15 @@ flowchart TD
   - control `TRAIN_SEQ_LEN=1024`, `TRAIN_BATCH_TOKENS=16384`: `val_bpb 3.5984`, int8+zlib bytes `5,645,476`
   - `TIED_EMB_FP32_MASTER=1`: `val_bpb 3.6019`, int8+zlib bytes `5,661,947`
 - Current conclusion: keeping the tied embedding fp32-master during training is plausible from external evidence, but it is not a free local win on the short 4060 proxy. Keep the idea alive, but do not prioritize it over branches with clearer same-checkpoint signal.
+- Added packed low-bit export support via `INT8_LOWBIT_BITS` and `INT8_LOWBIT_TARGET` and ran same-checkpoint probes on the saved current-best checkpoint:
+  - baseline export: `8,878,592` bytes, `3.43550794`
+  - `int6` on `mlp_proj` only: `7,685,366` bytes, `3.43626937`
+  - `int6` on all MLP weights: `6,621,505` bytes, `3.45281219`
+- Current conclusion: narrow mixed precision on `mlp_proj` is a credible byte saver, but full-MLP `int6` is too destructive and the exporter trick alone is not the main win.
+- Tested the PR-guided "buy wider MLP capacity" idea directly on the shared-core `9/3 @ 896` base with `EVAL_STRIDE_TOKENS=64` and short 10-step local post-quant probes:
+  - baseline `MLP_HIDDEN=1792`: `final_int8_zlib_roundtrip_exact val_bpb 3.56827291`, compressed size `5,533,450`
+  - wider `MLP_HIDDEN=2304`: `3.54919676`, compressed size `6,123,000`
+  - wider `MLP_HIDDEN=2688`: `3.56047610`, compressed size `6,608,336`
+  - wider `MLP_HIDDEN=2304` plus `int6 mlp_proj`: `3.55609707`, compressed size `6,043,219`
+  - wider `MLP_HIDDEN=2304` plus `vproj` equalization: `3.59200479`, compressed size `6,422,416`
+- Current conclusion: the real local win is moderate MLP widening itself, with `MLP_HIDDEN=2304` best of the tested settings. The mixed-precision and `vproj` stack-ons did not beat plain widened int8 on this branch.

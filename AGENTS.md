@@ -9,6 +9,7 @@
 - Local Python setup -> the repo is on `C:`, but the working Python environment is at `D:\venvs\parameter-golf`; prefer that venv for installs and runs because `C:` space is tight -> prevents repeated CUDA install failures from disk pressure.
 - Windows local launch -> for single-GPU local loops prefer `python train_gpt.py` over `torchrun`; the Windows launcher path can trip over libuv/rendezvous issues that do not matter for the 1-GPU smoke workflow -> avoids wasting time on launcher-specific failures.
 - Timed-out CUDA probes -> on this Windows 4060 setup, timed-out local Python evals can leave orphaned GPU worker processes behind; check `nvidia-smi` / `Get-Process python` and clean them before the next run if utilization looks stuck -> avoids poisoned timing and fake slowness from stale workers.
+- Windows artifact writes -> repeated local runs can occasionally fail saving `final_model.pt` / `final_model.int8.ptz` with Windows file-lock error `1224`; if that happens, remove the output artifacts before rerunning and restore tracked artifacts afterward -> avoids losing a good probe to a save-only failure.
 - Git checkpoints -> make descriptive checkpoint commits after substantial progress and push when the result is worth preserving remotely -> keeps rollback points available during long experiment loops.
 - Experiment file hygiene -> keep ad hoc experiment/result text snapshots under `experiments/` instead of the repo root; reserve `logs/` for run logs and keep the root focused on source/config files -> prevents the project root from turning into an unreadable dump of probes.
 - Local dev environment -> primary machine is Windows 11 with an RTX 4060 8GB -> use it for CUDA smoke tests and iteration, not as a proxy for 8xH100 leaderboard performance.
@@ -36,5 +37,5 @@
 - Best current local base -> shared-core recurrence `9 logical / 3 shared / dim 896`.
 - Best confirmed local improvement -> about `5.8%` better than the local baseline-style branch on the post-quant proxy.
 - Main bottleneck -> wider models improve pre-quant quality, then lose too much after int8 export.
-- Strongest active clean branches -> sliding-window eval, `v <-> proj` equalization, and tied-embedding precision handling.
+- Strongest active clean branches -> sliding-window eval, moderate MLP widening on the shared-core base, `v <-> proj` equalization, and tied-embedding precision handling.
 - Strategically strong but currently deferred -> tokenizer re-export (`SP-4096`) because local prep needs about `48.17 GB` of raw docs, even though tokenizer artifact accounting may be friendlier than we first assumed; longer-context training is also strategically real but the short 4060 proxy looked locally unattractive.
