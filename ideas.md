@@ -128,8 +128,9 @@ flowchart TD
 - Question shape: "Across PRs `#36` through the current latest, which clean leaderboard-safe ideas are still missing or underweighted in our memory?"
 - Sources used: GitHub PR pages and submission summaries for `#36-#70` only.
 - High-signal outcomes:
-  - long-context training is a real clean branch, not just an eval trick: PR #61 pushed `TRAIN_SEQ_LEN=4096` with matching long-context eval, and PR #63 independently supported the same family at `2048`
+  - long-context training is a real clean branch, not just an eval trick: PR #65 pushed `TRAIN_SEQ_LEN=4096` with matching long-context eval, and PR #63 independently supported the same family at `2048`
   - mixed-precision export is more compelling when framed as "buy capacity with saved bytes": PR #65 used int6/int8 allocation plus a wider `MLP_MULT=3` branch, which is stronger than our earlier generic mixed-precision note
+  - PR #61 adds a cleaner schedule-side sub-idea: a very long warmdown can sharply reduce post-training quantization damage even without changing the architecture
   - sliding-window eval, tokenizer efficiency, and fp16 tied embeddings were reaffirmed rather than replaced
 - Low-signal / out-of-scope outcomes:
   - val-train submissions stay out of scope for the current no-loophole direction
@@ -178,7 +179,7 @@ flowchart TD
 ### 6. Long-Context Training + Matching Long-Context Eval
 - Status: `Unvalidated`
 - Why: Real challenge runs now suggest that training and evaluating at `2048-4096` context is a clean gain source in its own right, not just a garnish on sliding-window eval.
-- Latest result: Newly promoted from the PR `#36-#70` audit. PR #61 reported `1.1793 val_bpb` with `TRAIN_SEQ_LEN=4096`, low LR, long warmdown, and matching long-context eval; PR #63 independently reached `1.2067` with `SEQ_LEN=2048` plus fp16 tied embeddings. The clean common thread is that longer context itself appears to survive the real `10 minute / 8xH100` budget.
+- Latest result: Newly promoted from the PR `#36-#70` audit. PR #65 reported `1.1808 val_bpb` with `TRAIN_SEQ_LEN=4096`, tuned Muon, and matching long-context sliding eval; PR #63 independently reached `1.2067` with `SEQ_LEN=2048` plus fp16 tied embeddings. The clean common thread is that longer context itself appears to survive the real `10 minute / 8xH100` budget.
 - Next step: Treat this as a first-class clean branch. Before implementing anything heavy locally, compare the repo's throughput assumptions and determine whether a smaller local proxy can still test the direction without turning into a misleading speed-only experiment.
 
 ### 7. FP16 Tied Embedding / Output Head Export
