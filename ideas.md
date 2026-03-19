@@ -50,8 +50,8 @@ When an experiment is run:
 ### 2. Row-Centered Int8 Export
 - Status: `Promising`
 - Why: Subtract the per-row mean before quantizing 2D weights, then add it back on dequantization so symmetric int8 bins are used on the centered residual instead of wasting dynamic range on row bias.
-- Latest result: Same-checkpoint exporter probes on the clean `9/3 @ 1024` control improved post-roundtrip `val_bpb` from `3.46420609` to `3.46273076` with compressed size increasing only from `11,045,085` to `11,081,284` bytes. The effect also repeated on another `1024` checkpoint at roughly the same magnitude.
-- Next step: Keep this integrated as an opt-in exporter path and test it on the best recurrence width (`896`) and a wider failure case when we do the next serious run.
+- Latest result: Same-checkpoint exporter probes on the clean `9/3 @ 1024` control improved post-roundtrip `val_bpb` from `3.46420609` to `3.46273076` with compressed size increasing only from `11,045,085` to `11,081,284` bytes, and the effect repeated on another `1024` checkpoint. But on the stronger `9/3 @ 896` branch it regressed slightly from `3.43772923` to `3.43820288`.
+- Next step: Keep this integrated as an opt-in exporter path and use it selectively on wider shared models where per-row bias seems to be part of the quantization failure mode.
 
 ### 3. Per-Row Weight Range Regularization
 - Status: `Testing`
@@ -190,4 +190,6 @@ When an experiment is run:
 - Added row-centered int8 export via `INT8_CENTER_ROWS` and verified it on same checkpoints:
   - clean `9/3 @ 1024` control: `3.46420609 -> 3.46273076`, compressed size `11,045,085 -> 11,081,284` bytes
   - another `1024` checkpoint: similar ~`0.0012` bpb gain
-- Current conclusion: centered export is the first post-recurrence exporter tweak with consistent same-checkpoint gains at a modest byte cost.
+- Added a follow-up probe on the current best `9/3 @ 896` checkpoint:
+  - `3.43772923 -> 3.43820288`, compressed size `8,883,503 -> 8,914,637` bytes
+- Current conclusion: centered export is a real width-recovery tool for the `1024` branch, but not a universal default for the best current `896` branch.

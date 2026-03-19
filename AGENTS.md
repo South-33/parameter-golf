@@ -9,7 +9,7 @@
 - Submission scoring -> final metric is post-quant `final_int8_zlib_roundtrip_exact val_bpb`, not the pre-quant validation loss -> optimizing a model that breaks after int8+zlib can look good mid-run but still fail the leaderboard metric.
 - Artifact accounting -> the 16,000,000-byte cap includes counted code plus compressed model bytes, and challenge submissions are expected to keep counted code in `train_gpt.py` while record PRs add a new folder under `records/` -> changing only root trainer code is not a valid final submission shape.
 - Evaluation/data -> validation is tokenizer-agnostic BPB on the fixed first-50k-doc `fineweb_val_*` split; tokenizer changes are allowed but scrutinized and must preserve correct byte accounting -> tokenizer bugs can create invalid wins.
-- Exporter direction -> on the local `9/3 @ 1024` proxy, centering each 2D weight row before int8 quantization consistently improved post-roundtrip `val_bpb` for only ~36 KB extra compressed size, while grouped per-row scales were mostly noise -> prioritize centered export before heavier serialization ideas.
+- Exporter direction -> row-centered int8 export is width-sensitive: it consistently helped the local `9/3 @ 1024` branch for ~36 KB extra compressed size, but slightly hurt the current best `9/3 @ 896` branch, while grouped per-row scales were mostly noise -> treat centered export as a recovery tool for wider models, not a blanket default.
 
 ## Main Goals
 
