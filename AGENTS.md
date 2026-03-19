@@ -9,3 +9,11 @@
 - Submission scoring -> final metric is post-quant `final_int8_zlib_roundtrip_exact val_bpb`, not the pre-quant validation loss -> optimizing a model that breaks after int8+zlib can look good mid-run but still fail the leaderboard metric.
 - Artifact accounting -> the 16,000,000-byte cap includes counted code plus compressed model bytes, and challenge submissions are expected to keep counted code in `train_gpt.py` while record PRs add a new folder under `records/` -> changing only root trainer code is not a valid final submission shape.
 - Evaluation/data -> validation is tokenizer-agnostic BPB on the fixed first-50k-doc `fineweb_val_*` split; tokenizer changes are allowed but scrutinized and must preserve correct byte accounting -> tokenizer bugs can create invalid wins.
+
+## Main Goals
+
+- Official challenge target -> minimize held-out loss on the fixed FineWeb dataset while staying within a strict `16 MB` artifact limit and a `10 minute` training budget on `8x H100s` -> this is the actual optimization problem from the OpenAI challenge page and repo.
+- Real win condition -> lower the final post-roundtrip metric `final_int8_zlib_roundtrip_exact val_bpb` on a leaderboard-safe run -> local pre-quant improvements alone are not wins.
+- Good wins -> architecture, quantization, tokenizer, or systems changes that improve final post-roundtrip `val_bpb`, preserve artifact viability, and plausibly scale to the real challenge budget -> these are the changes worth spending time on.
+- Weak wins -> local-only speedups, tiny pre-quant gains that vanish after quantization, or tweaks that only help the Windows smoke loop -> do not confuse iteration convenience with challenge progress.
+- Local loop purpose -> use the RTX 4060 setup to reject bad ideas quickly and identify promising ones for later serious runs -> treat local numbers as directional, not authoritative.

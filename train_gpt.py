@@ -91,6 +91,7 @@ class Hyperparameters:
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+    qat_start_step = int(os.environ.get("QAT_START_STEP", -1))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -415,6 +416,15 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
     return q, scale
 
+
+def fake_quantize_weight_ste(t: Tensor) -> Tensor:
+    q, scale = quantize_float_tensor(t)
+    if scale.ndim > 0:
+        dequant = q.float() * scale.to(dtype=torch.float32).view(q.shape[0], *([1] * (q.ndim - 1)))
+    else:
+        dequant = q.float() * float(scale.item())
+    return t + (dequant.to(dtype=t.dtype) - t).detach()
+
 def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
@@ -586,7 +596,8 @@ class CastedLinear(nn.Linear):
     # Keep weights in fp32 for optimizer/state quality, cast at matmul time for bf16 compute.
     def forward(self, x: Tensor) -> Tensor:
         bias = self.bias.to(x.dtype) if self.bias is not None else None
-        return F.linear(x, self.weight.to(x.dtype), bias)
+        weight = fake_quantize_weight_ste(self.weight) if getattr(self, "qat_enabled", False) else self.weight
+        return F.linear(x, weight.to(x.dtype), bias)
 
 
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
@@ -595,6 +606,12 @@ def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
         for name, param in module.named_parameters():
             if (param.ndim < 2 or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)) and param.dtype != torch.float32:
                 param.data = param.data.float()
+
+
+def set_qat_enabled(module: nn.Module, enabled: bool) -> None:
+    for submodule in module.modules():
+        if isinstance(submodule, CastedLinear):
+            submodule.qat_enabled = enabled
 
 
 class Rotary(nn.Module):
@@ -1048,6 +1065,7 @@ def main() -> None:
 
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model_params:{n_params}")
+    log0(f"qat_start_step:{args.qat_start_step}")
     log0(f"num_layers:{args.num_layers} num_shared_blocks:{args.num_shared_blocks}")
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0(
@@ -1094,6 +1112,8 @@ def main() -> None:
         remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0)
         return remaining_ms / max(warmdown_ms, 1e-9) if remaining_ms <= warmdown_ms else 1.0
 
+    set_qat_enabled(base_model, False)
+
     # Warmup primes the compiled forward/backward/optimizer paths, then we restore the
     # initial weights/optimizer state so measured training starts from the true init.
     if args.warmup_steps > 0:
@@ -1134,6 +1154,8 @@ def main() -> None:
     step = 0
     while True:
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
+        qat_enabled = args.qat_start_step >= 0 and step >= args.qat_start_step
+        set_qat_enabled(base_model, qat_enabled)
 
         should_validate = last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0)
         if should_validate:
@@ -1220,6 +1242,7 @@ def main() -> None:
         f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
+    set_qat_enabled(base_model, False)
 
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION

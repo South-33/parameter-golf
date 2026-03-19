@@ -48,10 +48,10 @@ When an experiment is run:
 - Next step: Build QAT on top of the shared-core branch, starting with `9 logical / 3 shared / dim 896` as the best current leaderboard-safe candidate.
 
 ### 2. Quantization-Aware Training Matching Export Path
-- Status: `Testing`
+- Status: `Weak`
 - Why: Train the model to survive the repo's actual int8 + zlib roundtrip so the final scored model loses less quality after export.
-- Latest result: Recurrence width scaling now has a clear post-quant bottleneck: `9/3 @ 1024` and `9/3 @ 1536` improved raw local validation but lost too much after the quant roundtrip.
-- Next step: Add fake quantization for large 2D weights late in training and compare the final post-roundtrip gap on the `9/3 @ 896` branch first.
+- Latest result: A first naive fake-quant pass on large linear weights with `QAT_START_STEP=10` did not produce a meaningful free win. `9/3 @ 896` improved only trivially from `3.62855` to `3.62825` post-quant bpb on the capped local proxy, while `9/3 @ 960` got worse and `9/3 @ 1024` improved only by noise-level margins.
+- Next step: Leave this aside as a free-win path; revisit only if we redesign QAT more carefully instead of just toggling naive late fake quant.
 
 ### 3. Sliding-Window Validation With Overlapping Context
 - Status: `Testing`
@@ -147,3 +147,8 @@ When an experiment is run:
   - shared `9/3 @ 1024`: pre-quant `3.5653`, post-quant `3.6459`
   - shared `9/3 @ 1536`: pre-quant `3.5560`, post-quant `3.7418`
 - Current conclusion: shared recurrence is promising, width helps, but quantization becomes the dominant limiter beyond roughly the `896` width range on the local short-run proxy.
+- Naive QAT sweep summary on the shared branch with `QAT_START_STEP=10`:
+  - shared `9/3 @ 896`: post-quant `3.6285 -> 3.6283` tiny improvement
+  - shared `9/3 @ 960`: post-quant `3.6364 -> 3.6366` worse
+  - shared `9/3 @ 1024`: post-quant `3.6459 -> 3.6456` tiny improvement
+- Current conclusion: naive late fake-quant is not a worthwhile free win; the architecture branch gave a real gain, but the first QAT version did not.
