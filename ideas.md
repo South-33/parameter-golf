@@ -92,15 +92,14 @@ flowchart TD
     H --> I["Main unresolved problem\nKeep the recurrence gain after int8 export\nwithout expensive or fragile branches"]
 ```
 
-## Working Notes
+## Prompt Craft
 
-- Current performance headline -> use the matched `9/9 @ 512` comparison and the `1.86%` improvement figure; do not resurrect the older proxy comparison as the main story.
-- Current best branch -> `9/3 @ 896 / MLP_HIDDEN=2304` remains the branch to beat until a new same-code control says otherwise.
-- Active local signal -> `KURTOSIS_PENALTY` is the first new post-agent idea with a real same-code gain signal, so keep it live for now.
-- Stable exporter signal -> `v <-> proj` equalization is the cleaner export-side result; bundled MLP equalization is not the default path.
-- Clean external signals -> sliding-window eval, tokenizer efficiency, long-context training, and precision allocation all have real PR support.
-- Local caveat -> the short 10-step proxy is noisy, so same-code controls matter more than comparing distant code states.
-- Strategic caveat -> tokenizer and long-context ideas are real, but local cost still matters; do not let them crowd out cheaper branches without a good reason.
+- Start from the current best branch and the current bottleneck, then ask for ideas that beat that branch without repeating already-tested families.
+- Ask for mechanism-level novelty first; renamed versions of weak ideas should be treated as repeats unless they change the mechanism.
+- Keep the prompt short, goal-oriented, and explicit about what counts as a useful comparison.
+- Require the agent to return the top ideas plus why they are new, why they target the bottleneck, and the best first experiment.
+- Include the current matchable local headline and any clean external signals so the next agent does not overfit to stale proxy comparisons.
+- After each research pass, record which prompt shape worked, which ideas were genuinely new, and what the next prompt should ask for or avoid.
 
 ## Research Log
 
