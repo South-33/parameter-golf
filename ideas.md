@@ -59,7 +59,6 @@ When a research pass is run:
   - sliding-window eval
   - moderate MLP widening on the shared-core base
   - `v <-> proj` equalization
-  - narrow attention-family GPTQ reconstruction
   - tied-embedding precision handling
   - post-quant control-tensor tuning
 - Current caution:
@@ -231,15 +230,20 @@ flowchart TD
 - Next step: Keep this below cleaner branches for now. Revisit only if we can prove a very cheap late-tuning phase fits inside the real 10-minute budget without materially cannibalizing the main training loop.
 
 ### 2e. GPTQ-Style Attention Reconstruction
-- Status: `Testing`
+- Status: `Weak`
 - Why: Use train-data calibration activations to do a second-order post-training reconstruction pass on the shared attention `c_v` / `proj` weights before final int8 export, targeting the actual post-quant collapse instead of nudging training dynamics.
-- Latest result: Narrow same-checkpoint exporter-only probes on the saved `20`-step `9/3 @ 896 / MLP_HIDDEN=2304` checkpoint are the cleanest new signal in the latest loop. Using train-data calibration and a GPTQ/OBC-style sequential reconstruction pass:
+- Latest result: Narrow same-checkpoint exporter-only probes on one saved `20`-step `9/3 @ 896 / MLP_HIDDEN=2304` checkpoint initially looked like the cleanest new signal in the latest loop. Using train-data calibration and a GPTQ/OBC-style sequential reconstruction pass:
   - baseline export: `3.63783062`, compressed size `5,778,098`
   - attention `proj` only: `3.60487437`, compressed size `7,995,261`
   - attention `c_v + proj`: `3.60469155`, compressed size `8,662,688`
   - MLP `fc` only: `3.63804545`, compressed size `9,128,195`
-  The attention-family branch produced a meaningful fixed-checkpoint gain while staying under the artifact cap, whereas the first MLP-side reconstruction pass was all byte cost and no quality win. A tiny end-to-end `train_gpt.py` smoke run with `INT8_GPTQ_TARGET=attn_vproj` also completed successfully, so the integrated exporter path is live even though the `1`-step score itself is not informative.
-- Next step: Keep the branch narrow. If continued, compare `attn_proj` vs `attn_vproj` with small calibration/damping sweeps and then do one end-to-end training run only after the same-checkpoint exporter signal is stable enough to justify it.
+  The attention-family branch produced a meaningful fixed-checkpoint gain while staying under the artifact cap, whereas the first MLP-side reconstruction pass was all byte cost and no quality win. But the signal did not survive a fresh current-code checkpoint rerun:
+  - refreshed baseline export: `3.42847805`, compressed size `7,401,194`
+  - refreshed attention `proj`, `1` calibration batch: `3.43174463`, compressed size `9,396,141`
+  - refreshed attention `proj`, `2` calibration batches: `3.43176493`, compressed size `9,396,139`
+  - refreshed attention `c_v + proj`, `1` calibration batch: `3.43185223`, compressed size `10,042,323`
+  A tiny end-to-end `train_gpt.py` smoke run with `INT8_GPTQ_TARGET=attn_vproj` also completed successfully, so the integrated exporter path is live, but the branch now looks checkpoint-specific and not trustworthy enough to promote.
+- Next step: Do not push this branch further right now. Keep the code available, but deprioritize it until a sharper reconstruction formulation or better external evidence justifies revisiting it.
 
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
@@ -563,3 +567,9 @@ flowchart TD
   - MLP `fc` only: `3.63804545`, compressed size `9,128,195`
 - Current conclusion: exporter-only second-order reconstruction is now the strongest clean quant-calibration signal in the repo, but it is narrow. The live branch is attention-family GPTQ, not broad all-layer reconstruction.
 - Integrated the narrow GPTQ branch into `train_gpt.py` behind `INT8_GPTQ_TARGET` and verified a tiny end-to-end smoke run with `INT8_GPTQ_TARGET=attn_vproj`, `INT8_GPTQ_CALIB_BATCHES=1` completed through final exact int8 eval.
+- Regenerated a fresh current widened checkpoint on the current codebase and reran the same-checkpoint GPTQ comparisons:
+  - refreshed baseline export: `3.42847805`, compressed size `7,401,194`
+  - refreshed attention `proj`, `1` calibration batch: `3.43174463`, compressed size `9,396,141`
+  - refreshed attention `proj`, `2` calibration batches: `3.43176493`, compressed size `9,396,139`
+  - refreshed attention `c_v + proj`, `1` calibration batch: `3.43185223`, compressed size `10,042,323`
+- Current conclusion: the earlier GPTQ win did not hold on the fresh checkpoint. The branch is now mixed / checkpoint-specific rather than promoted.
