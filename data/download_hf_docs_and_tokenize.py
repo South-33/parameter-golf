@@ -526,15 +526,20 @@ def main() -> None:
 
     docs_jsonl = output_root / DOCS_FILENAME
     sidecar = output_root / SIDECAR_FILENAME
-    if not copy_from_hf_cache(
-        repo_id=args.repo_id,
-        remote_root=args.remote_root,
-        filename=DOCS_FILENAME,
-        destination=docs_jsonl,
-    ):
-        remote = f"{args.remote_root}/{DOCS_FILENAME}" if args.remote_root else DOCS_FILENAME
-        raise FileNotFoundError(f"{remote} not found in Hugging Face dataset repo {args.repo_id}")
-    if not copy_from_hf_cache(
+    if docs_jsonl.exists():
+        print(f"Reusing existing local docs cache: {docs_jsonl}", flush=True)
+    else:
+        if not copy_from_hf_cache(
+            repo_id=args.repo_id,
+            remote_root=args.remote_root,
+            filename=DOCS_FILENAME,
+            destination=docs_jsonl,
+        ):
+            remote = f"{args.remote_root}/{DOCS_FILENAME}" if args.remote_root else DOCS_FILENAME
+            raise FileNotFoundError(f"{remote} not found in Hugging Face dataset repo {args.repo_id}")
+    if sidecar.exists():
+        print(f"Reusing existing local docs sidecar: {sidecar}", flush=True)
+    elif not copy_from_hf_cache(
         repo_id=args.repo_id,
         remote_root=args.remote_root,
         filename=SIDECAR_FILENAME,
