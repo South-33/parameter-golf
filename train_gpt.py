@@ -52,6 +52,8 @@ class Hyperparameters:
     final_eval_compare_stride_tokens = int(os.environ.get("FINAL_EVAL_COMPARE_STRIDE_TOKENS", "0"))
     val_max_tokens = int(os.environ.get("VAL_MAX_TOKENS", 0))
     skip_final_quant_eval = bool(int(os.environ.get("SKIP_FINAL_QUANT_EVAL", "0")))
+    post_quant_control_tune_steps = int(os.environ.get("POST_QUANT_CONTROL_TUNE_STEPS", "0"))
+    post_quant_control_tune_lr = float(os.environ.get("POST_QUANT_CONTROL_TUNE_LR", "0.0"))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
     disable_compile = bool(int(os.environ.get("DISABLE_COMPILE", "1" if os.name == "nt" else "0")))
     sdp_backend = os.environ.get("SDP_BACKEND", "math" if os.name == "nt" else "flash")
@@ -808,6 +810,21 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
     return out
 
 
+def apply_export_roundtrip_to_matrix_params_(module: nn.Module) -> dict[str, object]:
+    quant_obj, quant_stats = quantize_state_dict_int8(module.state_dict())
+    roundtripped = dequantize_state_dict_int8(quant_obj)
+    with torch.no_grad():
+        for name, param in module.named_parameters():
+            if (
+                name != "tok_emb.weight"
+                and not name.startswith("lm_head.")
+                and param.ndim == 2
+                and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS)
+            ):
+                param.data.copy_(roundtripped[name].to(device=param.device, dtype=param.dtype))
+    return quant_stats
+
+
 # -----------------------------
 # DATA LOADING 
 # -----------------------------
@@ -1484,6 +1501,10 @@ def main() -> None:
     log0(f"adapter_rank:{args.adapter_rank}")
     log0(f"row_max_penalty:{args.row_max_penalty}")
     log0(f"kurtosis_penalty:{args.kurtosis_penalty}")
+    log0(
+        f"post_quant_control_tune_steps:{args.post_quant_control_tune_steps} "
+        f"post_quant_control_tune_lr:{args.post_quant_control_tune_lr}"
+    )
     log0(f"seed:{args.seed}")
     log0(f"int8_group_size:{INT8_GROUP_SIZE}")
     log0(f"int8_center_rows:{int(INT8_CENTER_ROWS)}")
@@ -1659,6 +1680,47 @@ def main() -> None:
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
     set_qat_enabled(base_model, False)
+
+    if args.post_quant_control_tune_steps > 0:
+        quant_stats = apply_export_roundtrip_to_matrix_params_(base_model)
+        calib_lr = args.post_quant_control_tune_lr if args.post_quant_control_tune_lr > 0.0 else args.scalar_lr
+        calib_optimizer = torch.optim.Adam(
+            [{"params": scalar_params, "lr": calib_lr, "base_lr": calib_lr}],
+            betas=(args.beta1, args.beta2),
+            eps=args.adam_eps,
+            fused=True,
+        )
+        calib_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+        log0(
+            f"post_quant_control_tune:start steps:{args.post_quant_control_tune_steps} lr:{calib_lr} "
+            f"payload:{quant_stats['int8_payload_bytes']}"
+        )
+        model.train()
+        for calib_step in range(args.post_quant_control_tune_steps):
+            zero_grad_all()
+            calib_optimizer.zero_grad(set_to_none=True)
+            calib_loss = torch.zeros((), device=device)
+            for micro_step in range(grad_accum_steps):
+                if distributed:
+                    model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
+                x, y = calib_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                    loss = model(x, y)
+                calib_loss += loss.detach()
+                (loss * grad_scale).backward()
+            calib_loss /= grad_accum_steps
+            calib_optimizer.step()
+            zero_grad_all()
+            if (
+                args.post_quant_control_tune_steps <= 10
+                or calib_step == 0
+                or calib_step + 1 == args.post_quant_control_tune_steps
+                or (calib_step + 1) % 10 == 0
+            ):
+                log0(
+                    f"post_quant_control_tune:step {calib_step + 1}/{args.post_quant_control_tune_steps} "
+                    f"train_loss:{calib_loss.item():.4f}"
+                )
 
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION

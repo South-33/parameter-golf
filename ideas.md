@@ -60,6 +60,7 @@ When a research pass is run:
   - moderate MLP widening on the shared-core base
   - `v <-> proj` equalization
   - tied-embedding precision handling
+  - post-quant control-tensor tuning
 - Current caution:
   - kurtosis regularization and component-decoupled sharing both showed mixed or weak evidence on the short 10-step local loop, so neither should currently replace the plain widened shared-core branch as the main local reference
 - Strategically strong but deferred here:
@@ -193,10 +194,17 @@ flowchart TD
 - Next step: Leave this family below stronger branches unless a sharper formulation appears, such as heterogeneous per-shared-block MLP budgets or a more byte-efficient specialization mechanism.
 
 ### 2d. Per-Block Warmdown Quantization Calibration
-- Status: `Unvalidated`
+- Status: `Testing`
 - Why: Shared blocks are reused across multiple logical depths, so a short post-training calibration pass that optimizes their quantized reconstruction could pay back more than a generic exporter tweak or naive QAT.
-- Latest result: Not yet implemented here. The latest targeted ideation pass elevated this as the strongest post-training follow-up that is neither another pure exporter trick nor another full training rewrite.
-- Next step: If exporter-only ideas keep saturating, test a narrow calibration loop on the current widened branch: freeze the trained checkpoint, optimize small per-channel corrections or equivalent scales for the reused block matrices, and judge it on same-checkpoint post-roundtrip eval.
+- Latest result: Implemented the first narrow version as a post-quant control-tensor tuning phase: roundtrip the large matrix weights through the existing int8 exporter in-memory, leave the tiny untied control/scalar tensors trainable, and run a short late tuning loop on train data before final export. On the current `9/3 @ 896 / MLP_HIDDEN=2304 / NUM_SHARED_MLPS=3` branch under the short local setup:
+  - same-code control `POST_QUANT_CONTROL_TUNE_STEPS=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.58972699`, compressed size `6,265,605`
+  - tuned `POST_QUANT_CONTROL_TUNE_STEPS=5`, `POST_QUANT_CONTROL_TUNE_LR=0.01`: `3.48631035`, compressed size `5,952,985`
+  - tuned confirm: `3.52452419`, compressed size `6,300,311`
+  This is the first post-quant branch in a while that produced repeated, non-tiny improvements on the same code path. But it is not an apples-to-apples free win yet: the tuned branch spends extra late training steps, so it must be judged against compute-matched baselines.
+  A first compute-matched smoke check (`ITERATIONS=5` plus `POST_QUANT_CONTROL_TUNE_STEPS=5`) was clearly bad:
+  - `final_int8_zlib_roundtrip_exact val_bpb 8.03244041`, compressed size `5,623,458`
+  So this branch does not replace ordinary training; it only looks plausible as a late add-on after enough base optimization.
+- Next step: Keep this branch active, but only as a late-phase add-on. If continued, compare it against a stronger time-matched baseline or reduce the late-tuning cost enough that it can plausibly fit inside the real 10-minute budget without gutting the main training phase.
 
 ### 3. Rotation / Incoherence Transforms
 - Status: `Weak`
@@ -487,3 +495,12 @@ flowchart TD
   - matched-budget split `NUM_SHARED_MLPS=9`, `MLP_HIDDEN=768`: `3.54167698`, compressed size `6,351,414`
   - larger split `NUM_SHARED_MLPS=9`, `MLP_HIDDEN=1024`: `3.57769543`, compressed size `7,098,835`
 - Current conclusion: the first component-decoupled sharing probes are not strong enough to keep grinding; the matched-budget version is basically a draw and the larger version is worse.
+- Implemented a first post-quant calibration branch by roundtripping matrix weights through the existing int8 exporter in-memory and running a short late train-data tuning loop on the untied control/scalar tensors only.
+- Same-code short local probes on the current widened branch:
+  - control `POST_QUANT_CONTROL_TUNE_STEPS=0`: `final_int8_zlib_roundtrip_exact val_bpb 3.58972699`, compressed size `6,265,605`
+  - tuned `POST_QUANT_CONTROL_TUNE_STEPS=5`, `POST_QUANT_CONTROL_TUNE_LR=0.01`: `3.48631035`, compressed size `5,952,985`
+  - tuned confirm: `3.52452419`, compressed size `6,300,311`
+- Current conclusion: this is the strongest new post-quant branch in the latest loop, but it is not yet a clean headline because the tuned branch spends extra late training steps and therefore needs a compute-matched control before promotion to the main current-best branch.
+- First compute-matched smoke check:
+  - `ITERATIONS=5` + `POST_QUANT_CONTROL_TUNE_STEPS=5`: `final_int8_zlib_roundtrip_exact val_bpb 8.03244041`, compressed size `5,623,458`
+- Current conclusion: the late control-tuning phase is not a substitute for main training; it only looks plausible as an add-on after enough base optimization.
