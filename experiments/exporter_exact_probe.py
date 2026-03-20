@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val-max-tokens", type=int, default=65536)
     p.add_argument("--val-batch-size", type=int, default=16384)
     p.add_argument("--eval-stride", type=int, default=64)
+    p.add_argument("--eval-doc-isolated", type=int, choices=(0, 1), default=None)
     p.add_argument("--calib-batch-tokens", type=int, default=16384)
     p.add_argument("--device", default="cuda")
     return p.parse_args()
@@ -44,6 +45,8 @@ def main() -> None:
     args = tg.Hyperparameters()
     args.train_seq_len = cli.seq_len
     args.eval_stride_tokens = cli.eval_stride
+    if cli.eval_doc_isolated is not None:
+        args.eval_doc_isolated = bool(cli.eval_doc_isolated)
     args.val_max_tokens = cli.val_max_tokens
     args.val_batch_size = cli.val_batch_size
     args.train_batch_tokens = cli.calib_batch_tokens
