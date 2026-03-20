@@ -61,6 +61,13 @@ When an experiment is run:
 - Exact result on the same capped val slice: `final_int8_zlib_roundtrip_exact val_loss:6.54623695 val_bpb:2.87818965`.
 - Artifact result: `Serialized model int8+zlib: 7890451 bytes`, `Total submission size int8+zlib: 7991899 bytes`.
 - Interpretation: the extra width spent more bytes and got a worse exact post-quant score than `640/1664`, so the next bytes should go toward higher-signal ideas like tied-embedding protection rather than plain width scaling.
+
+### 2026-03-20 - FP16 token embedding export did not help the conservative SP-4096 branch
+
+- Config change vs the conservative smoke: same `SP-4096 640/1664` branch, but `INT8_KEEP_TOK_EMB_FP16=1`.
+- Exact result on the same capped val slice: `final_int8_zlib_roundtrip_exact val_loss:6.46898749 val_bpb:2.84422532`.
+- Artifact result: `Serialized model int8+zlib: 8051333 bytes`, `Total submission size int8+zlib: 8152781 bytes`.
+- Interpretation: exporter-only FP16 token embedding cost about `2.03 MB` extra counted bytes and was slightly worse than the plain int8-embedding baseline, so the next serious branch should be longer context or schedule work, not this export toggle.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
