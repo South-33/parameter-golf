@@ -619,3 +619,7 @@ flowchart TD
   - cheap verification passed: `py_compile` succeeded, real local val shards show exactly `50,000` `BOS`-delimited docs, and a tiny GPU smoke using the new eval path returned a valid `val_loss` / `val_bpb`
 - Current conclusion:
   - best next local/cloud direction is now `doc-isolated eval + SP-4096 + schedule/context work`, not more GPTQ/adaptive-clipping style exporter probing
+  - first same-checkpoint local checks on an older `9/3 @ 896 / MLP_HIDDEN=1792` raw checkpoint are mixed but alive rather than dead:
+    - first `20`-doc slice at `EVAL_STRIDE_TOKENS=64`: doc-isolated was slightly worse (`+0.0066 bpb`)
+    - second `50`-doc slice on the same checkpoint/settings: doc-isolated was slightly better (`-0.00485 bpb`)
+    - take this as an early directional smoke only; it is enough to keep the branch alive, but not enough to promote it without a fuller same-checkpoint evaluation
