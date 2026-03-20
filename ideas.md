@@ -89,6 +89,26 @@ When an experiment is run:
 - Scope: overtone init reshapes the tied embedding singular values to a `k^-0.5` decay; phase init schedules `resid_mixes` from early-`x0` heavy to late-residual heavy.
 - Status: implemented, not validated yet.
 - Next step: test them only after `MUON_WEIGHT_DECAY`, and prefer isolated branch combinations instead of enabling all three copied tricks at once.
+
+### 2026-03-20 - Tiny local rung says Muon WD and phase init are not free wins
+
+- Comparison rung: same tiny local `sp1024` smoke on the shared-core `9/3 @ 896 / MLP_HIDDEN=2304` branch with `ITERATIONS=4`, `TRAIN_BATCH_TOKENS=16384`, `EVAL_STRIDE_TOKENS=64`, `EVAL_DOC_ISOLATED=1`, and `VAL_MAX_TOKENS=131072`.
+- Control:
+  - exact `final_int8_zlib_roundtrip_exact val_bpb: 3.93657217`
+  - int8+zlib size: `5,979,689`
+- `MUON_WEIGHT_DECAY=0.02`:
+  - exact `3.93736593`
+  - size: `5,971,034`
+- `OVERTONE_EMBED_INIT=1`:
+  - exact `4.04952126`
+  - size: `5,936,524`
+- `RESID_MIX_PHASE_INIT=1`:
+  - exact `3.96003911`
+  - size: `5,963,718`
+- `MUON_WEIGHT_DECAY=0.02 + RESID_MIX_PHASE_INIT=1`:
+  - exact `3.96038698`
+  - size: `5,954,984`
+- Interpretation: overtone is clearly bad on this local rung; phase-init and Muon WD are both mechanically safe but slightly worse than the plain control, so none of these copied winning-branch tricks should be promoted based on local tiny-smoke evidence alone.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
