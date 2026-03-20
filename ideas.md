@@ -215,8 +215,20 @@ When an experiment is run:
   - `vproj`: `3.75986421`, `7,410,723` bytes
   - `gptq_attn_proj`: `3.76000592`, `9,240,446` bytes
   - `gptq_attn_vproj`: `3.76034299`, `9,886,137` bytes
-  - `activation_vproj`: `3.76388833`, `7,456,276` bytes
+- `activation_vproj`: `3.76388833`, `7,456,276` bytes
 - Interpretation: this is the clearest evidence yet that exporter-side rankings are highly checkpoint-depth-sensitive on the local rung. The shallow 4-step checkpoint made several exporter branches look good, but the stronger 8-step checkpoint put plain export back on top and made every tested exporter tweak worse.
+
+### 2026-03-20 - 12-step checkpoint makes `vproj` barely win again
+
+- Same sweep tool and eval settings again, but on a fresh local control checkpoint trained for `ITERATIONS=12`.
+- Ranked results from the sweep:
+  - `vproj`: `3.58459404`, `8,275,773` bytes
+  - `plain`: `3.58468203`, `8,153,954` bytes
+  - `gptq_attn_vproj`: `3.58508405`, `10,609,906` bytes
+  - `gptq_attn_proj`: `3.58517289`, `9,981,062` bytes
+  - `center_rows`: `3.58596011`, `8,190,282` bytes
+  - `activation_vproj`: `3.58912059`, `8,315,601` bytes
+- Interpretation: the exporter ranking is not even monotonic with checkpoint depth. After the 8-step checkpoint put plain export back on top, the 12-step checkpoint made weight-only `vproj` narrowly best again. That reinforces the promotion rule: no exporter tweak should be promoted off a single local checkpoint depth.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
