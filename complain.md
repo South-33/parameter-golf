@@ -15,6 +15,13 @@ Keep entries short:
 - `Next fix`
 - `Status`
 
+Complaint lifecycle:
+- if a complaint is weak or one-off, leave it recorded and do not act on it yet
+- if a complaint is clearly real, recurring, and worth fixing, the agent should either:
+  - fix it directly if the scope is safe and local, or
+  - explicitly consult the user about prioritizing/funding the fix if it needs time, money, or workflow changes
+- do not let "real" complaints sit forever as passive notes
+
 Example:
 
 ## 2026-03-20 - Runpod Logging Split
