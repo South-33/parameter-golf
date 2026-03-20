@@ -54,6 +54,13 @@ When an experiment is run:
 - Exact result on the capped 1,046,718-score-token val slice: `final_int8_zlib_roundtrip_exact val_loss:6.46848655 val_bpb:2.84400507`.
 - Artifact result: `Serialized model int8+zlib: 6021764 bytes`, `Total submission size int8+zlib: 6123212 bytes`.
 - Interpretation: the `SP-4096` branch is now mechanically proven end-to-end on cloud hardware and still has huge byte headroom; the remaining question is comparative quality, not viability.
+
+### 2026-03-20 - Larger SP-4096 width was worse, not better
+
+- Config change vs the conservative smoke: `MODEL_DIM=768`, `MLP_HIDDEN=2048` with the same `SP-4096`, lower-LR schedule, `EVAL_STRIDE_TOKENS=64`, `EVAL_DOC_ISOLATED=1`, and `VAL_MAX_TOKENS=1048576`.
+- Exact result on the same capped val slice: `final_int8_zlib_roundtrip_exact val_loss:6.54623695 val_bpb:2.87818965`.
+- Artifact result: `Serialized model int8+zlib: 7890451 bytes`, `Total submission size int8+zlib: 7991899 bytes`.
+- Interpretation: the extra width spent more bytes and got a worse exact post-quant score than `640/1664`, so the next bytes should go toward higher-signal ideas like tied-embedding protection rather than plain width scaling.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
