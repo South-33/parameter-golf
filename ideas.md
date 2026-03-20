@@ -146,6 +146,26 @@ When an experiment is run:
   - exact `3.39133140`
   - size: `8,909,907`
 - Interpretation: the new trustworthy exporter-only rung immediately re-confirmed the main surviving small signal: weight-only `vproj` still helps on the current checkpoint, while row-centering is worse here.
+
+### 2026-03-20 - Calibration-aware exporter exact rung demotes activation-aware `vproj`, revives narrow GPTQ
+
+- Same checkpoint and rung as the plain/vproj/row-centering exporter comparison: current local `final_model.pt`, `seq_len=1024`, `eval_stride=64`, `EVAL_DOC_ISOLATED=1`, `VAL_MAX_TOKENS=32768`.
+- Plain export:
+  - exact `3.38825662`
+  - size: `8,878,605`
+- Weight-only `INT8_SCALE_REPARAM_KIND=vproj`:
+  - exact `3.38633439`
+  - size: `8,917,803`
+- Activation-aware `INT8_ACTIVATION_REPARAM_KIND=vproj`, `INT8_ACTIVATION_REPARAM_ALPHA=0.5`, `INT8_ACTIVATION_REPARAM_CALIB_BATCHES=2`:
+  - exact `3.39083767`
+  - size: `8,944,174`
+- Narrow GPTQ `INT8_GPTQ_TARGET=attn_proj`, `INT8_GPTQ_CALIB_BATCHES=1`:
+  - exact `3.38653849`
+  - size: `10,174,845`
+- Narrow GPTQ `INT8_GPTQ_TARGET=attn_vproj`, `INT8_GPTQ_CALIB_BATCHES=1`:
+  - exact `3.38543863`
+  - size: `10,693,538`
+- Interpretation: on the current checkpoint, activation-aware `vproj` is clearly demoted, weight-only `vproj` remains the best cheap exporter-side tweak, and narrow GPTQ is alive again with `attn_vproj` best of the tested exporter variants, but at a real byte premium of roughly `+1.8 MB` over plain export.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
