@@ -1,0 +1,11 @@
+{
+  "author": "South-33",
+  "github_id": "South-33",
+  "name": "SP-4096 Smoke 640",
+  "blurb": "1x RTX 3090 capped-validation smoke for the current best SP-4096 branch; useful as a reproducible candidate snapshot, not a submission-grade 8xH100 record.",
+  "date": "2026-03-20T09:10:00Z",
+  "val_loss": 6.46848655,
+  "val_bpb": 2.84400507,
+  "bytes_total": 6123212,
+  "bytes_code": 101448
+}
