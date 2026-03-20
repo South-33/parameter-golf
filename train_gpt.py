@@ -99,6 +99,7 @@ class Hyperparameters:
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
     muon_momentum_warmup_start = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
     muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
+    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
@@ -1904,7 +1905,8 @@ def main() -> None:
     log0(
         f"tie_embeddings:{args.tie_embeddings} embed_lr:{token_lr} "
         f"head_lr:{args.head_lr if base_model.lm_head is not None else 0.0} "
-        f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr}"
+        f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr} "
+        f"muon_weight_decay:{args.muon_weight_decay}"
     )
     log0(f"tied_emb_fp32_master:{int(args.tied_emb_fp32_master and args.tie_embeddings)}")
     log0(
@@ -2079,6 +2081,12 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(base_model.parameters(), args.grad_clip_norm)
         for opt in optimizers:
             opt.step()
+        if args.muon_weight_decay > 0.0:
+            # Decouple Muon matrix decay from the orthogonalized gradient update.
+            with torch.no_grad():
+                wd_scale = 1.0 - args.muon_weight_decay * optimizer_muon.param_groups[0]["lr"]
+                for p in matrix_params:
+                    p.mul_(wd_scale)
         zero_grad_all()
 
         step += 1

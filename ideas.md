@@ -75,6 +75,13 @@ When an experiment is run:
 - Exact result on the same capped val slice: `final_int8_zlib_roundtrip_exact val_loss:6.47397697 val_bpb:2.84641905`.
 - Artifact result: `Serialized model int8+zlib: 6000294 bytes`, `Total submission size int8+zlib: 6101742 bytes`.
 - Interpretation: the leaderboard long-context idea did not transfer to this tiny 1x3090 smoke; on our current cheap-cloud rung, `TRAIN_SEQ_LEN=1024` still beats `2048` for the `SP-4096 640/1664` branch.
+
+### 2026-03-20 - Ported decoupled Muon weight decay from notapplica's winning branch
+
+- Change: added `MUON_WEIGHT_DECAY` to our trainer and apply it as post-step decoupled decay on `matrix_params`, matching the public notapplica pattern.
+- Why this one: among the public top-score tricks, this looked like the smallest safe structural port with a plausible chance to matter across branches.
+- Status: implemented, not validated yet.
+- Next step: test it first on the current best `SP-4096 640/1664` smoke branch before copying lower-confidence tricks like overtone init or phase-transition `resid_mix`.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
