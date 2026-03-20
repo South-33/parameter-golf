@@ -229,6 +229,18 @@ When an experiment is run:
   - `center_rows`: `3.58596011`, `8,190,282` bytes
   - `activation_vproj`: `3.58912059`, `8,315,601` bytes
 - Interpretation: the exporter ranking is not even monotonic with checkpoint depth. After the 8-step checkpoint put plain export back on top, the 12-step checkpoint made weight-only `vproj` narrowly best again. That reinforces the promotion rule: no exporter tweak should be promoted off a single local checkpoint depth.
+
+### 2026-03-20 - 16-step checkpoint keeps `vproj` barely ahead and shrinks GPTQ's case
+
+- Ran the same depth-sweep harness again on a fresh local control checkpoint trained for `ITERATIONS=16`.
+- Ranked results from the sweep:
+  - `vproj`: `3.46430999`, `8,851,937` bytes
+  - `gptq_attn_proj`: `3.46448769`, `10,457,784` bytes
+  - `gptq_attn_vproj`: `3.46491604`, `11,076,974` bytes
+  - `center_rows`: `3.46517496`, `8,794,639` bytes
+  - `plain`: `3.46541998`, `8,757,393` bytes
+  - `activation_vproj`: `3.46651173`, `8,887,498` bytes
+- Interpretation: on stronger local checkpoints, cheap weight-only `vproj` is the only exporter tweak that still shows a persistent positive edge at tolerable byte cost. GPTQ can still look slightly positive by exact `val_bpb`, but its gain has shrunk to near-plain noise while costing roughly `1.7-2.3 MB` extra, which makes it a poor local default.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:

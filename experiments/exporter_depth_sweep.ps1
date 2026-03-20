@@ -1,4 +1,5 @@
 param(
+    [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$IterationsList = @("4", "8", "12"),
     [string]$RunPrefix = "exporter_depth_sweep",
     [string]$PythonExe = "D:\venvs\parameter-golf\Scripts\python.exe"
@@ -7,6 +8,12 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+
+$IterationsList = @(
+    $IterationsList |
+        ForEach-Object { $_ -split '[,\s]+' } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)
 
 $logsDir = Join-Path $repoRoot "logs"
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
