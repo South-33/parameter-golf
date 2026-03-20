@@ -109,6 +109,17 @@ When an experiment is run:
   - exact `3.96038698`
   - size: `5,954,984`
 - Interpretation: overtone is clearly bad on this local rung; phase-init and Muon WD are both mechanically safe but slightly worse than the plain control, so none of these copied winning-branch tricks should be promoted based on local tiny-smoke evidence alone.
+
+### 2026-03-20 - Slightly stronger local rung still leaves Muon WD flat
+
+- Comparison rung: same local `sp1024` cheap rung, but with `ITERATIONS=8`, `TRAIN_BATCH_TOKENS=16384`, `WARMUP_STEPS=2`, `WARMDOWN_ITERS=4`, `EVAL_STRIDE_TOKENS=64`, `EVAL_DOC_ISOLATED=1`, and `VAL_MAX_TOKENS=131072`.
+- Control:
+  - exact `final_int8_zlib_roundtrip_exact val_bpb: 3.75548732`
+  - int8+zlib size: `7,223,463`
+- `MUON_WEIGHT_DECAY=0.02`:
+  - exact `3.75558901`
+  - size: `7,204,430`
+- Interpretation: the slightly deeper local rung removes most of the 4-step noise excuse and still leaves Muon WD essentially flat/slightly worse, so this branch remains unpromoted locally even though it still might deserve one cloud check later if we run out of better ideas.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
