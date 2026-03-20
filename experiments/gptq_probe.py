@@ -34,6 +34,22 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def normalize_checkpoint_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    out: dict[str, torch.Tensor] = {}
+    for name, tensor in state_dict.items():
+        if name.startswith("blocks."):
+            parts = name.split(".")
+            if len(parts) >= 4:
+                block_idx = parts[1]
+                suffix = ".".join(parts[2:])
+                if suffix.startswith("attn."):
+                    name = f"attn_blocks.{block_idx}.{suffix}"
+                elif suffix.startswith("mlp."):
+                    name = f"mlp_blocks.{block_idx}.{suffix}"
+        out[name] = tensor
+    return out
+
+
 def build_model(args: tg.Hyperparameters, device: torch.device) -> tg.GPT:
     model = tg.GPT(
         vocab_size=args.vocab_size,
@@ -192,7 +208,7 @@ def evaluate_quant_obj(
 def main() -> None:
     cli = parse_args()
     device = torch.device(cli.device)
-    state_dict = torch.load(cli.checkpoint, map_location="cpu")
+    state_dict = normalize_checkpoint_state_dict(torch.load(cli.checkpoint, map_location="cpu"))
     target_names = resolve_targets(state_dict, cli.targets)
 
     args = tg.Hyperparameters()

@@ -131,6 +131,21 @@ When an experiment is run:
   - exact `3.75590020`
   - size: `7,223,839`
 - Interpretation: the stronger local rung still leaves fp32-master tied embeddings slightly worse than the plain control, so the branch remains strategically plausible from leaderboard evidence but not locally promoted.
+
+### 2026-03-20 - Generic exporter-only exact rung confirms `vproj`, rejects row-centering on the current checkpoint
+
+- New harness tool: `experiments/exporter_exact_probe.py` now gives a generic same-checkpoint exact exporter comparison using the current env-controlled quantization flags, without retraining.
+- Checkpoint and rung: current local `final_model.pt`, `seq_len=1024`, `eval_stride=64`, `EVAL_DOC_ISOLATED=1`, `VAL_MAX_TOKENS=32768`.
+- Plain export:
+  - exact `val_bpb: 3.38825662`
+  - size: `8,878,605`
+- `INT8_SCALE_REPARAM_KIND=vproj`:
+  - exact `3.38633439`
+  - size: `8,917,803`
+- `INT8_CENTER_ROWS=1`:
+  - exact `3.39133140`
+  - size: `8,909,907`
+- Interpretation: the new trustworthy exporter-only rung immediately re-confirmed the main surviving small signal: weight-only `vproj` still helps on the current checkpoint, while row-centering is worse here.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
