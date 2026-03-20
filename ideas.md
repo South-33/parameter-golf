@@ -573,3 +573,40 @@ flowchart TD
   - refreshed attention `proj`, `2` calibration batches: `3.43176493`, compressed size `9,396,139`
   - refreshed attention `c_v + proj`, `1` calibration batch: `3.43185223`, compressed size `10,042,323`
 - Current conclusion: the earlier GPTQ win did not hold on the fresh checkpoint. The branch is now mixed / checkpoint-specific rather than promoted.
+- Moved the tokenizer branch onto Runpod after the local 16 GB laptop proved too small for the full docs-based rebuild:
+  - first pod tried the correct `runpod/parameter-golf:latest` template on an `RTX 3090`, but SSH had been disabled in the UI, so it was deleted and recreated with SSH enabled before doing any real work
+  - the pod image defaults Hugging Face cache writes into the small `/root` overlay; the initial `docs_selected.jsonl` download failed there despite the large `/workspace` volume, then succeeded once `HF_HOME=/workspace/.cache/huggingface` and `HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub` were set
+  - after download, there was a second ~`45 GB` duplicate under `/workspace/.cache`; deleting that cache after the raw docs landed restored the expected storage headroom
+- Pod-side tokenizer feasibility check on the real docs cache:
+  - downloaded the published `sp1024` tokenizer plus `docs_selected.jsonl` onto the pod
+  - trained a full `sp4096` SentencePiece model on the raw docs only (no shard export yet for this probe)
+  - measured fertility on the first `5,000` validation docs:
+    - `sp1024`: `0.4157568644` tokens/byte
+    - `sp4096`: `0.3066736453` tokens/byte
+    - ratio `sp4096 / sp1024`: `0.7376273769`
+- Current conclusion: the tokenizer branch finally has direct in-repo evidence that matches the external PR claims closely enough to justify the full `sp4096` shard export.
+- Launched the full `sp4096` local re-export on the pod using the already-trained tokenizer via `--reuse-sp-model`:
+  - output root: `/workspace/pg-sp4096-export`
+  - process log: `/workspace/parameter-golf/logs/sp4096_full_export.log`
+  - status at launch: running cleanly with log lines `Reusing existing local docs cache...` and `Exporting dataset: fineweb10B_sp4096`
+- Full `sp4096` pod export completed successfully:
+  - success line: `Done. Manifest: /workspace/pg-sp4096-export/manifest.json`
+  - dataset: `fineweb10B_sp4096`
+  - tokenizer: `sp_bpe_4096`
+  - stats from manifest:
+    - `docs_total`: `15,368,808`
+    - `docs_val`: `50,000`
+    - `docs_train`: `15,318,808`
+    - `files_total`: `144`
+    - `files_val`: `1`
+    - `files_train`: `143`
+    - `tokens_total`: `14,315,946,905`
+    - `tokens_val`: `45,516,437`
+    - `tokens_train`: `14,270,430,468`
+  - dataset directory size on pod: about `27 GB`
+- Monitoring outcome:
+  - the detached completion watcher plus 10-minute progress poller worked, but the first blocking stall heuristic fired at the same moment the export exited because the file count had plateaued before the final manifest write
+  - current conclusion: use `.done`/manifest success markers as the authoritative finish signal and treat simple no-growth stall rules as advisory only
+- Operational conclusion:
+  - the tokenizer branch is no longer hypothetical; we now have a finished in-repo `sp4096` export ready for model runs
+  - after export completion the Runpod pod was stopped to save credits during the pause before the first `sp4096` training probe
