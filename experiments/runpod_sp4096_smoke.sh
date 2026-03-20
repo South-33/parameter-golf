@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd /workspace/parameter-golf
+
+export RUN_ID="${RUN_ID:-sp4096_smoke}"
+export DATA_PATH="${DATA_PATH:-/workspace/pg-sp4096-export/datasets/fineweb10B_sp4096}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-/workspace/pg-sp4096-export/tokenizers/fineweb_4096_bpe.model}"
+export VOCAB_SIZE="${VOCAB_SIZE:-4096}"
+
+export NUM_LAYERS="${NUM_LAYERS:-9}"
+export NUM_SHARED_BLOCKS="${NUM_SHARED_BLOCKS:-3}"
+export NUM_SHARED_MLPS="${NUM_SHARED_MLPS:-3}"
+export MODEL_DIM="${MODEL_DIM:-640}"
+export MLP_HIDDEN="${MLP_HIDDEN:-1664}"
+export NUM_HEADS="${NUM_HEADS:-8}"
+export NUM_KV_HEADS="${NUM_KV_HEADS:-4}"
+export TIE_EMBEDDINGS="${TIE_EMBEDDINGS:-1}"
+
+export TRAIN_SEQ_LEN="${TRAIN_SEQ_LEN:-1024}"
+export TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-32768}"
+export ITERATIONS="${ITERATIONS:-20}"
+export WARMUP_STEPS="${WARMUP_STEPS:-5}"
+export WARMDOWN_ITERS="${WARMDOWN_ITERS:-10}"
+export MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-180}"
+
+export EVAL_STRIDE_TOKENS="${EVAL_STRIDE_TOKENS:-64}"
+export EVAL_DOC_ISOLATED="${EVAL_DOC_ISOLATED:-1}"
+export VAL_MAX_TOKENS="${VAL_MAX_TOKENS:-1048576}"
+export TRAIN_LOG_EVERY="${TRAIN_LOG_EVERY:-1}"
+
+export MATRIX_LR="${MATRIX_LR:-0.02}"
+export SCALAR_LR="${SCALAR_LR:-0.02}"
+export TIED_EMBED_LR="${TIED_EMBED_LR:-0.03}"
+export MUON_MOMENTUM="${MUON_MOMENTUM:-0.99}"
+export MUON_MOMENTUM_WARMUP_START="${MUON_MOMENTUM_WARMUP_START:-0.92}"
+export MUON_MOMENTUM_WARMUP_STEPS="${MUON_MOMENTUM_WARMUP_STEPS:-1500}"
+
+export DISABLE_COMPILE="${DISABLE_COMPILE:-1}"
+
+python3 train_gpt.py
