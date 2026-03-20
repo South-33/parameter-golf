@@ -82,6 +82,13 @@ When an experiment is run:
 - Why this one: among the public top-score tricks, this looked like the smallest safe structural port with a plausible chance to matter across branches.
 - Status: implemented, not validated yet.
 - Next step: test it first on the current best `SP-4096 640/1664` smoke branch before copying lower-confidence tricks like overtone init or phase-transition `resid_mix`.
+
+### 2026-03-20 - Ported overtone embedding init and phase-transition resid_mix init
+
+- Change: added `OVERTONE_EMBED_INIT`, `RESID_MIX_PHASE_INIT`, and `RESID_MIX_PHASE_GAIN` as gated ports of the public notapplica winning-branch initialization tricks.
+- Scope: overtone init reshapes the tied embedding singular values to a `k^-0.5` decay; phase init schedules `resid_mixes` from early-`x0` heavy to late-residual heavy.
+- Status: implemented, not validated yet.
+- Next step: test them only after `MUON_WEIGHT_DECAY`, and prefer isolated branch combinations instead of enabling all three copied tricks at once.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:

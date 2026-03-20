@@ -85,6 +85,9 @@ class Hyperparameters:
     adapter_rank = int(os.environ.get("ADAPTER_RANK", 0))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     tied_emb_fp32_master = bool(int(os.environ.get("TIED_EMB_FP32_MASTER", "0")))
+    overtone_embed_init = bool(int(os.environ.get("OVERTONE_EMBED_INIT", "0")))
+    resid_mix_phase_init = bool(int(os.environ.get("RESID_MIX_PHASE_INIT", "0")))
+    resid_mix_phase_gain = float(os.environ.get("RESID_MIX_PHASE_GAIN", 3.0))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
 
@@ -1525,6 +1528,9 @@ class GPT(nn.Module):
         tie_embeddings: bool,
         tied_emb_fp32_master: bool,
         tied_embed_init_std: float,
+        overtone_embed_init: bool,
+        resid_mix_phase_init: bool,
+        resid_mix_phase_gain: float,
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
@@ -1545,6 +1551,9 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_emb_fp32_master = tied_emb_fp32_master and tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
+        self.overtone_embed_init = overtone_embed_init
+        self.resid_mix_phase_init = resid_mix_phase_init
+        self.resid_mix_phase_gain = resid_mix_phase_gain
         self.logit_softcap = logit_softcap
         self.num_layers = num_layers
         self.num_shared_blocks = num_shared_blocks
@@ -1606,9 +1615,33 @@ class GPT(nn.Module):
     def _init_weights(self) -> None:
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
+            if self.overtone_embed_init:
+                # Shape the tied embedding spectrum toward a smooth power-law decay.
+                with torch.no_grad():
+                    u, s, v = torch.linalg.svd(self.tok_emb.weight.data, full_matrices=False)
+                    target_s = s[0] * torch.arange(
+                        1,
+                        s.shape[0] + 1,
+                        device=s.device,
+                        dtype=s.dtype,
+                    ).pow(-0.5)
+                    self.tok_emb.weight.data = (u * target_s.unsqueeze(0)) @ v
         for module in self.modules():
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
+        if self.resid_mix_phase_init:
+            with torch.no_grad():
+                denom = max(self.num_layers - 1, 1)
+                for i in range(self.num_layers):
+                    phase = torch.sigmoid(
+                        torch.tensor(
+                            self.resid_mix_phase_gain * (i / denom - 0.5),
+                            dtype=self.resid_mixes.dtype,
+                            device=self.resid_mixes.device,
+                        )
+                    )
+                    self.resid_mixes[i, 0].fill_(phase.item())
+                    self.resid_mixes[i, 1].fill_(1.0 - phase.item())
 
     def _forward_hidden(self, input_ids: Tensor) -> Tensor:
         if self.tied_emb_fp32_master:
@@ -1808,6 +1841,9 @@ def main() -> None:
         tie_embeddings=args.tie_embeddings,
         tied_emb_fp32_master=args.tied_emb_fp32_master,
         tied_embed_init_std=args.tied_embed_init_std,
+        overtone_embed_init=args.overtone_embed_init,
+        resid_mix_phase_init=args.resid_mix_phase_init,
+        resid_mix_phase_gain=args.resid_mix_phase_gain,
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
@@ -1909,6 +1945,11 @@ def main() -> None:
         f"muon_weight_decay:{args.muon_weight_decay}"
     )
     log0(f"tied_emb_fp32_master:{int(args.tied_emb_fp32_master and args.tie_embeddings)}")
+    log0(
+        f"overtone_embed_init:{int(args.overtone_embed_init)} "
+        f"resid_mix_phase_init:{int(args.resid_mix_phase_init)} "
+        f"resid_mix_phase_gain:{args.resid_mix_phase_gain}"
+    )
     log0(
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
