@@ -623,3 +623,8 @@ flowchart TD
     - first `20`-doc slice at `EVAL_STRIDE_TOKENS=64`: doc-isolated was slightly worse (`+0.0066 bpb`)
     - second `50`-doc slice on the same checkpoint/settings: doc-isolated was slightly better (`-0.00485 bpb`)
     - take this as an early directional smoke only; it is enough to keep the branch alive, but not enough to promote it without a fuller same-checkpoint evaluation
+  - thermal-governed local follow-up on the same checkpoint kept the 4060 well under the requested temp ceiling while strengthening the signal slightly:
+    - `60` docs: `flat 3.44697296` vs `doc-isolated 3.44556630` (`-0.00140667 bpb`)
+    - `120` docs: `flat 3.47205114` vs `doc-isolated 3.46942384` (`-0.00262731 bpb`)
+    - `300` docs: `flat 3.44462959` vs `doc-isolated 3.44389556` (`-0.00073404 bpb`)
+    - interpretation: the effect currently looks real but small on this older local checkpoint; enough to keep enabled as a serious eval option, not enough to treat as the main headline by itself
