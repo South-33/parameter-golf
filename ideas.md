@@ -192,6 +192,19 @@ When an experiment is run:
   - exact `3.89219934`
   - size: `8,835,446`
 - Interpretation: on the fresh consistency-checked checkpoint, both exporter-only branches are real wins over plain export, but weight-only `vproj` is slightly better and far cheaper than narrow `attn_vproj` GPTQ.
+
+### 2026-03-20 - Full exporter sweep says activation-aware `vproj` is still alive, but checkpoint-sensitive
+
+- New harness tool: `experiments/exporter_sweep.ps1` runs the main exporter variants on one checkpoint with explicit eval settings and returns a ranked summary.
+- Sweep target: the same fresh consistency-checked local control checkpoint as above, with `seq_len=1024`, `eval_stride=64`, `EVAL_DOC_ISOLATED=1`, and `VAL_MAX_TOKENS=131072`.
+- Ranked results from the sweep:
+  - `activation_vproj`: `3.89104636`, `6,221,827` bytes
+  - `vproj`: `3.89144567`, `6,201,672` bytes
+  - `gptq_attn_vproj`: `3.89219934`, `8,835,446` bytes
+  - `gptq_attn_proj`: `3.89254764`, `8,171,987` bytes
+  - `center_rows`: `3.90204599`, `6,023,033` bytes
+  - `plain`: `3.93658066`, `5,979,689` bytes
+- Interpretation: this is the strongest current evidence that activation-aware `vproj` is not dead, just checkpoint-sensitive. On this fresh checkpoint it narrowly beat weight-only `vproj`, while older tracked-checkpoint probes had it losing. So the right summary is still "mixed/testing", not promoted, but no longer simply demoted.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
