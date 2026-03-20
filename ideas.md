@@ -628,3 +628,9 @@ flowchart TD
     - `120` docs: `flat 3.47205114` vs `doc-isolated 3.46942384` (`-0.00262731 bpb`)
     - `300` docs: `flat 3.44462959` vs `doc-isolated 3.44389556` (`-0.00073404 bpb`)
     - interpretation: the effect currently looks real but small on this older local checkpoint; enough to keep enabled as a serious eval option, not enough to treat as the main headline by itself
+### 2026-03-20 - Runpod SP-4096 smoke failure was a real trainer bug, not pod noise
+
+- Symptom: the cleaned-up migrated-pod `SP-4096` smoke reached export successfully, logged `Total submission size int8+zlib: 6123662 bytes`, then crashed before `final_int8_zlib_roundtrip_exact`.
+- Root cause: after adding `EVAL_DOC_ISOLATED`, `eval_val()` gained a required `bos_id` parameter, but the final post-quant roundtrip call in `train_gpt.py` still used the old signature.
+- Impact: cloud smoke looked "logically complete but missing final metric" when the real issue was a late `TypeError` after export.
+- Fix: pass `bos_id` through the final int8 roundtrip `eval_val(...)` call too, then rerun the smoke with the same `SP-4096` config.

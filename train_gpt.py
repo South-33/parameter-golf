@@ -2234,6 +2234,7 @@ def main() -> None:
             base_bytes_lut,
             has_leading_space_lut,
             is_boundary_token_lut,
+            bos_id,
         )
         torch.cuda.synchronize()
         log0(
