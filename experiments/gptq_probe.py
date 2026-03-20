@@ -50,6 +50,9 @@ def build_model(args: tg.Hyperparameters, device: torch.device) -> tg.GPT:
         tie_embeddings=args.tie_embeddings,
         tied_emb_fp32_master=args.tied_emb_fp32_master,
         tied_embed_init_std=args.tied_embed_init_std,
+        overtone_embed_init=args.overtone_embed_init,
+        resid_mix_phase_init=args.resid_mix_phase_init,
+        resid_mix_phase_gain=args.resid_mix_phase_gain,
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
@@ -167,6 +170,7 @@ def evaluate_quant_obj(
     base_bytes_lut: torch.Tensor,
     has_leading_space_lut: torch.Tensor,
     is_boundary_token_lut: torch.Tensor,
+    bos_id: int,
 ) -> tuple[float, float]:
     model = build_model(args, device)
     model.load_state_dict(tg.dequantize_state_dict_int8(quant_obj), strict=True)
@@ -181,6 +185,7 @@ def evaluate_quant_obj(
         base_bytes_lut=base_bytes_lut,
         has_leading_space_lut=has_leading_space_lut,
         is_boundary_token_lut=is_boundary_token_lut,
+        bos_id=bos_id,
     )
 
 
@@ -203,7 +208,14 @@ def main() -> None:
     args.mlp_hidden = int(state_dict[[n for n in state_dict if n.endswith("mlp.fc.weight")][0]].shape[0])
 
     sp = spm.SentencePieceProcessor(model_file=args.tokenizer_path)
-    val_tokens = tg.load_validation_tokens(args.val_files, args.train_seq_len, args.val_max_tokens)
+    bos_id = int(sp.bos_id())
+    val_tokens = tg.load_validation_tokens(
+        args.val_files,
+        args.train_seq_len,
+        args.val_max_tokens,
+        preserve_docs=args.eval_doc_isolated,
+        bos_id=bos_id,
+    )
     if device.type == "cuda":
         sp_luts = tg.build_sentencepiece_luts(sp, args.vocab_size, device)
     else:
@@ -223,7 +235,7 @@ def main() -> None:
 
     baseline_obj, _ = tg.quantize_state_dict_int8(state_dict)
     baseline_loss, baseline_bpb = evaluate_quant_obj(
-        baseline_obj, args, device, val_tokens, *sp_luts
+        baseline_obj, args, device, val_tokens, *sp_luts, bos_id
     )
     baseline_bytes = compressed_size_bytes(baseline_obj)
     print(f"baseline bytes={baseline_bytes} val_loss={baseline_loss:.8f} val_bpb={baseline_bpb:.8f}")
@@ -235,7 +247,7 @@ def main() -> None:
         gptq_obj["scales"][name] = scales.to(dtype=tg.INT8_PER_ROW_SCALE_DTYPE).contiguous()
 
     gptq_loss, gptq_bpb = evaluate_quant_obj(
-        gptq_obj, args, device, val_tokens, *sp_luts
+        gptq_obj, args, device, val_tokens, *sp_luts, bos_id
     )
     gptq_bytes = compressed_size_bytes(gptq_obj)
     print("targets:")
