@@ -22,15 +22,13 @@ Complaint lifecycle:
   - explicitly consult the user about prioritizing/funding the fix if it needs time, money, or workflow changes
 - do not let "real" complaints sit forever as passive notes
 
-Example:
-
 ## 2026-03-20 - Runpod Logging Split
 
 - Area: cloud harness
 - Complaint: pod smoke runs can write the useful trainer output to `logs/<RUN_ID>.txt` while the outer `nohup`/driver log stays empty, which makes progress checks and metric capture slower than they should be.
 - Impact: wastes cloud time and causes false uncertainty about whether a run is healthy.
-- Next fix: add one canonical launch wrapper that writes a single driver log plus explicit done/failed sentinels.
-- Status: open
+- Next fix: use `experiments/runpod_launch_wrapper.sh` as the canonical cloud launch path and teach future runs to read `.status` / `.done` / `.failed`.
+- Status: partial fix
 
 ## 2026-03-20 - Evidence Ladder Is Too Implicit
 
@@ -38,4 +36,4 @@ Example:
 - Complaint: local short-proxy reruns, same-checkpoint exporter evals, and capped cloud smoke runs all answer different questions, but the repo does not state clearly which evidence outranks which.
 - Impact: makes it too easy to overreact to weak signals or compare mismatched results.
 - Next fix: add a short comparison ladder near the top of `AGENTS.md`.
-- Status: open
+- Status: fixed

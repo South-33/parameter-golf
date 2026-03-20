@@ -47,6 +47,12 @@
 - Research direction -> recent research passes pointed toward rotation/incoherence and scale-reparameterization as promising families, but the fixed Hadamard exporter probe underperformed; exact weight-only `v <-> proj` equalization still has the cleanest signal so far, while activation-aware `vproj` and `relu^2` MLP equalization both need caution -> treat this as current evidence, not a locked roadmap.
 - Leaderboard direction -> official records are currently dominated by doc-isolated sliding eval, longer context, lower LR/longer warmdown, and tied-embedding precision; exporter-only micro-tweaks look secondary by comparison -> bias new work toward eval/schedule/context before more quant nibbling.
 
+## Evidence Ladder
+
+- `8xH100 final exact` > `same-branch cloud exact final` > `same-checkpoint exporter-only exact` > `capped cloud smoke exact` > `local short proxy`.
+- Promotion rule -> do not let a weaker rung overrule a stronger rung without a concrete reason; use lower rungs to filter bad ideas, not to claim wins.
+- Comparison rule -> only compare results from the same rung unless the purpose is explicitly to decide whether a branch deserves promotion to a stronger rung.
+
 ## Main Goals
 
 - Official challenge target -> minimize held-out loss on the fixed FineWeb dataset while staying within a strict `16 MB` artifact limit and a `10 minute` training budget on `8x H100s` -> this is the actual optimization problem from the OpenAI challenge page and repo.
