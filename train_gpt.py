@@ -51,6 +51,7 @@ class Hyperparameters:
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     eval_stride_tokens = int(os.environ.get("EVAL_STRIDE_TOKENS", os.environ.get("TRAIN_SEQ_LEN", 1024)))
+    eval_doc_isolated = bool(int(os.environ.get("EVAL_DOC_ISOLATED", "0")))
     final_eval_compare_stride_tokens = int(os.environ.get("FINAL_EVAL_COMPARE_STRIDE_TOKENS", "0"))
     val_max_tokens = int(os.environ.get("VAL_MAX_TOKENS", 0))
     skip_final_quant_eval = bool(int(os.environ.get("SKIP_FINAL_QUANT_EVAL", "0")))
@@ -228,12 +229,36 @@ def build_sentencepiece_luts(
     )
 
 
-def load_validation_tokens(pattern: str, seq_len: int, max_tokens: int = 0) -> Tensor:
+def load_validation_tokens(
+    pattern: str,
+    seq_len: int,
+    max_tokens: int = 0,
+    *,
+    preserve_docs: bool = False,
+    bos_id: int | None = None,
+) -> Tensor:
     files = [Path(p) for p in sorted(glob.glob(pattern))]
     if not files:
         raise FileNotFoundError(f"No files found for pattern: {pattern}")
     # The export pipeline writes the fixed first-50k-doc validation set to fineweb_val_*.
     tokens = torch.cat([load_data_shard(file) for file in files]).contiguous()
+    if preserve_docs:
+        if max_tokens > 0:
+            limit = min(tokens.numel(), max_tokens + 1)
+            if limit < tokens.numel():
+                if bos_id is None:
+                    raise ValueError("bos_id is required when preserve_docs=True and VAL_MAX_TOKENS > 0")
+                bos_positions = torch.nonzero(tokens[:limit] == bos_id, as_tuple=False).flatten()
+                if bos_positions.numel() >= 2:
+                    limit = int(bos_positions[-1].item())
+                elif limit < tokens.numel():
+                    raise ValueError(
+                        "VAL_MAX_TOKENS is too small to preserve a full validation document under EVAL_DOC_ISOLATED=1"
+                    )
+            tokens = tokens[:limit]
+        if tokens.numel() <= 1:
+            raise ValueError("Validation split is too short for doc-isolated evaluation")
+        return tokens
     usable = ((tokens.numel() - 1) // seq_len) * seq_len
     if max_tokens > 0:
         usable = min(usable, (max_tokens // seq_len) * seq_len)
@@ -255,6 +280,7 @@ def eval_val(
     base_bytes_lut: Tensor,
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
+    bos_id: int,
 ) -> tuple[float, float]:
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
@@ -289,9 +315,89 @@ def eval_val(
             token_bytes = token_bytes * mask.to(dtype=torch.float64)
         val_byte_count += token_bytes.sum()
 
+    def accumulate_logits(logits: Tensor, x_ids: Tensor, y_ids: Tensor, score_len: int | None = None) -> None:
+        nonlocal val_loss_sum, val_token_count
+        if score_len is None:
+            logits_sel = logits
+            x_sel = x_ids
+            y_sel = y_ids
+        else:
+            logits_sel = logits[:, -score_len:, :]
+            x_sel = x_ids[:, -score_len:]
+            y_sel = y_ids[:, -score_len:]
+        token_loss = F.cross_entropy(
+            logits_sel.float().reshape(-1, logits_sel.size(-1)),
+            y_sel.reshape(-1),
+            reduction="sum",
+        ).to(torch.float64)
+        token_count = float(y_sel.numel())
+        val_loss_sum += token_loss
+        val_token_count += token_count
+        accumulate_token_bytes(x_sel.reshape(-1), y_sel.reshape(-1))
+
+    def iter_doc_ranges() -> list[tuple[int, int]]:
+        bos_positions = torch.nonzero(val_tokens == bos_id, as_tuple=False).flatten()
+        if bos_positions.numel() == 0:
+            raise ValueError("Validation split has no BOS tokens, cannot enable EVAL_DOC_ISOLATED")
+        if int(bos_positions[0].item()) != 0:
+            raise ValueError("Validation split does not begin with BOS, cannot enable EVAL_DOC_ISOLATED")
+        ranges: list[tuple[int, int]] = []
+        for i, start_tensor in enumerate(bos_positions):
+            start = int(start_tensor.item())
+            end = int(bos_positions[i + 1].item()) if i + 1 < bos_positions.numel() else int(val_tokens.numel())
+            if end - start > 1:
+                ranges.append((start, end))
+        if not ranges:
+            raise ValueError("Validation split contains no scoreable documents under EVAL_DOC_ISOLATED")
+        return ranges
+
     model.eval()
     with torch.inference_mode():
-        if score_stride == args.train_seq_len:
+        if args.eval_doc_isolated:
+            doc_ranges = iter_doc_ranges()
+            doc_start = (len(doc_ranges) * rank) // world_size
+            doc_end = (len(doc_ranges) * (rank + 1)) // world_size
+            for raw_start, raw_end in doc_ranges[doc_start:doc_end]:
+                doc = val_tokens[raw_start:raw_end]
+                doc_slots = doc.numel() - 1
+                if doc_slots <= 0:
+                    continue
+                if score_stride == args.train_seq_len:
+                    next_score_start = 0
+                    while next_score_start < doc_slots:
+                        score_end = min(next_score_start + args.train_seq_len, doc_slots)
+                        local = doc[next_score_start : score_end + 1].to(
+                            device=device, dtype=torch.int64, non_blocking=True
+                        )
+                        x = local[:-1].unsqueeze(0)
+                        y = local[1:].unsqueeze(0)
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                            logits = model(x)
+                        accumulate_logits(logits, x, y)
+                        next_score_start = score_end
+                else:
+                    first_score_end = min(args.train_seq_len, doc_slots)
+                    first = doc[: first_score_end + 1].to(device=device, dtype=torch.int64, non_blocking=True)
+                    x_first = first[:-1].unsqueeze(0)
+                    y_first = first[1:].unsqueeze(0)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                        first_logits = model(x_first)
+                    accumulate_logits(first_logits, x_first, y_first)
+
+                    next_score_start = first_score_end
+                    while next_score_start < doc_slots:
+                        score_end = min(next_score_start + score_stride, doc_slots)
+                        score_len = score_end - next_score_start
+                        local = doc[score_end - args.train_seq_len : score_end + 1].to(
+                            device=device, dtype=torch.int64, non_blocking=True
+                        )
+                        x = local[:-1].unsqueeze(0)
+                        y = local[1:].unsqueeze(0)
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                            logits = model(x)
+                        accumulate_logits(logits, x, y, score_len)
+                        next_score_start = score_end
+        elif score_stride == args.train_seq_len:
             for batch_seq_start in range(seq_start, seq_end, local_batch_seqs):
                 batch_seq_end = min(batch_seq_start + local_batch_seqs, seq_end)
                 raw_start = batch_seq_start * args.train_seq_len
@@ -1654,16 +1760,33 @@ def main() -> None:
         raise ValueError(
             f"VOCAB_SIZE={args.vocab_size} does not match tokenizer vocab_size={int(sp.vocab_size())}"
         )
+    bos_id = int(sp.bos_id())
     dataset_dir = Path(args.data_path).resolve()
     actual_train_files = len(list(dataset_dir.glob("fineweb_train_*.bin")))
-    val_tokens = load_validation_tokens(args.val_files, args.train_seq_len, args.val_max_tokens)
+    val_tokens = load_validation_tokens(
+        args.val_files,
+        args.train_seq_len,
+        args.val_max_tokens,
+        preserve_docs=args.eval_doc_isolated,
+        bos_id=bos_id,
+    )
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
     )
+    if args.eval_doc_isolated:
+        val_doc_count = int((val_tokens == bos_id).sum().item())
+        val_score_tokens = int(val_tokens.numel() - val_doc_count)
+    else:
+        val_doc_count = None
+        val_score_tokens = int(val_tokens.numel() - 1)
     log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
-    log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
+    if val_doc_count is None:
+        log0(f"val_loader:shards pattern={args.val_files} tokens:{val_score_tokens}")
+    else:
+        log0(f"val_loader:shards pattern={args.val_files} docs:{val_doc_count} score_tokens:{val_score_tokens}")
     log0(f"eval_stride_tokens:{args.eval_stride_tokens}")
+    log0(f"eval_doc_isolated:{int(args.eval_doc_isolated)}")
     log0(f"val_max_tokens:{args.val_max_tokens}")
 
     # -----------------------------
@@ -1906,6 +2029,7 @@ def main() -> None:
                 base_bytes_lut,
                 has_leading_space_lut,
                 is_boundary_token_lut,
+                bos_id,
             )
             log0(
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
@@ -2134,6 +2258,7 @@ def main() -> None:
                 base_bytes_lut,
                 has_leading_space_lut,
                 is_boundary_token_lut,
+                bos_id,
             )
             torch.cuda.synchronize()
             args.eval_stride_tokens = original_stride

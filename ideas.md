@@ -610,3 +610,12 @@ flowchart TD
 - Operational conclusion:
   - the tokenizer branch is no longer hypothetical; we now have a finished in-repo `sp4096` export ready for model runs
   - after export completion the Runpod pod was stopped to save credits during the pause before the first `sp4096` training probe
+- Official leaderboard scan on `2026-03-20` changed priorities:
+  - strongest repeated signals across the top `track_10min_16mb` records are `doc-isolated sliding eval`, longer context (`2048/4096`), lower LR / longer warmdown, and tied-embedding precision; exporter-only micro-tweaks look secondary by comparison
+  - the current top record is `2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit`, but the cleaner takeaway from the surrounding records is that eval/context/schedule/embedding precision are the real shared wins, while overtone/residual-mixing style extras are under-ablated
+- Implemented a first repo-side `doc-isolated` eval path in `train_gpt.py` behind `EVAL_DOC_ISOLATED=1`:
+  - validation loading can now preserve full document boundaries instead of forcing the val split into one flat `TRAIN_SEQ_LEN`-aligned stream
+  - the new eval branch splits documents on `BOS` (current export prepends `BOS` and does not append `EOS`), partitions docs across ranks, and prevents any scoring context from crossing document boundaries
+  - cheap verification passed: `py_compile` succeeded, real local val shards show exactly `50,000` `BOS`-delimited docs, and a tiny GPU smoke using the new eval path returned a valid `val_loss` / `val_bpb`
+- Current conclusion:
+  - best next local/cloud direction is now `doc-isolated eval + SP-4096 + schedule/context work`, not more GPTQ/adaptive-clipping style exporter probing
