@@ -68,6 +68,13 @@ When an experiment is run:
 - Exact result on the same capped val slice: `final_int8_zlib_roundtrip_exact val_loss:6.46898749 val_bpb:2.84422532`.
 - Artifact result: `Serialized model int8+zlib: 8051333 bytes`, `Total submission size int8+zlib: 8152781 bytes`.
 - Interpretation: exporter-only FP16 token embedding cost about `2.03 MB` extra counted bytes and was slightly worse than the plain int8-embedding baseline, so the next serious branch should be longer context or schedule work, not this export toggle.
+
+### 2026-03-20 - Longer context also failed to beat the conservative SP-4096 smoke
+
+- Config change vs the conservative smoke: same `SP-4096 640/1664` branch and same lower-LR schedule, but `TRAIN_SEQ_LEN=2048`.
+- Exact result on the same capped val slice: `final_int8_zlib_roundtrip_exact val_loss:6.47397697 val_bpb:2.84641905`.
+- Artifact result: `Serialized model int8+zlib: 6000294 bytes`, `Total submission size int8+zlib: 6101742 bytes`.
+- Interpretation: the leaderboard long-context idea did not transfer to this tiny 1x3090 smoke; on our current cheap-cloud rung, `TRAIN_SEQ_LEN=1024` still beats `2048` for the `SP-4096 640/1664` branch.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
