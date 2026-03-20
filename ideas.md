@@ -166,6 +166,32 @@ When an experiment is run:
   - exact `3.38543863`
   - size: `10,693,538`
 - Interpretation: on the current checkpoint, activation-aware `vproj` is clearly demoted, weight-only `vproj` remains the best cheap exporter-side tweak, and narrow GPTQ is alive again with `attn_vproj` best of the tested exporter variants, but at a real byte premium of roughly `+1.8 MB` over plain export.
+
+### 2026-03-20 - Fresh checkpoint consistency test says the local exact harness is basically sane
+
+- Purpose: directly test whether trainer final exact and the new generic exporter probe agree on the same saved checkpoint under identical eval settings.
+- Fresh control rung: canonical local tiny control (`ITERATIONS=4`, `seq_len=1024`, `eval_stride=64`, `EVAL_DOC_ISOLATED=1`, `VAL_MAX_TOKENS=131072`).
+- Trainer final exact on that run:
+  - `final_int8_zlib_roundtrip_exact val_bpb: 3.93657217`
+  - size: `5,979,689`
+- `experiments/exporter_exact_probe.py` on the exact same freshly produced `final_model.pt`:
+  - exact `3.93658066`
+  - size: `5,979,689`
+- Interpretation: the two paths match to tiny numerical noise, which is strong evidence against a major hidden mismatch bug in the local exact-eval/exporter-probe rung.
+
+### 2026-03-20 - Fresh consistency-checked checkpoint refreshes exporter ranking
+
+- Same fresh control checkpoint and identical eval settings as the harness consistency test above.
+- Plain export:
+  - exact `3.93658066`
+  - size: `5,979,689`
+- Weight-only `INT8_SCALE_REPARAM_KIND=vproj`:
+  - exact `3.89144567`
+  - size: `6,201,672`
+- Narrow GPTQ `INT8_GPTQ_TARGET=attn_vproj`, `INT8_GPTQ_CALIB_BATCHES=1`:
+  - exact `3.89219934`
+  - size: `8,835,446`
+- Interpretation: on the fresh consistency-checked checkpoint, both exporter-only branches are real wins over plain export, but weight-only `vproj` is slightly better and far cheaper than narrow `attn_vproj` GPTQ.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
