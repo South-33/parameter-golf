@@ -205,6 +205,18 @@ When an experiment is run:
   - `center_rows`: `3.90204599`, `6,023,033` bytes
   - `plain`: `3.93658066`, `5,979,689` bytes
 - Interpretation: this is the strongest current evidence that activation-aware `vproj` is not dead, just checkpoint-sensitive. On this fresh checkpoint it narrowly beat weight-only `vproj`, while older tracked-checkpoint probes had it losing. So the right summary is still "mixed/testing", not promoted, but no longer simply demoted.
+
+### 2026-03-20 - Stronger 8-step checkpoint flips the exporter sweep back to plain export
+
+- Same sweep tool and eval settings as above, but on a stronger fresh local control checkpoint trained for `ITERATIONS=8` instead of `4`.
+- Ranked results from the sweep:
+  - `plain`: `3.75551668`, `7,223,463` bytes
+  - `center_rows`: `3.75790431`, `7,259,982` bytes
+  - `vproj`: `3.75986421`, `7,410,723` bytes
+  - `gptq_attn_proj`: `3.76000592`, `9,240,446` bytes
+  - `gptq_attn_vproj`: `3.76034299`, `9,886,137` bytes
+  - `activation_vproj`: `3.76388833`, `7,456,276` bytes
+- Interpretation: this is the clearest evidence yet that exporter-side rankings are highly checkpoint-depth-sensitive on the local rung. The shallow 4-step checkpoint made several exporter branches look good, but the stronger 8-step checkpoint put plain export back on top and made every tested exporter tweak worse.
 - move the idea up or down if the evidence changed the ranking
 
 When a research pass is run:
