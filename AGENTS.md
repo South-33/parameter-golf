@@ -62,6 +62,7 @@
 - `8xH100 final exact` > `same-branch cloud exact final` > `same-checkpoint exporter-only exact` > `capped cloud smoke exact` > `local short proxy`.
 - Promotion rule -> do not let a weaker rung overrule a stronger rung without a concrete reason; use lower rungs to filter bad ideas, not to claim wins.
 - Comparison rule -> only compare results from the same rung unless the purpose is explicitly to decide whether a branch deserves promotion to a stronger rung.
+- Exporter promotion rule -> do not promote an exporter-only tweak off a single shallow local checkpoint; prefer at least one same-checkpoint exact read plus one stronger local checkpoint or cloud confirmation before treating it as the new default.
 
 ## Main Goals
 
